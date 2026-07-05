@@ -89,6 +89,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/agent/state", s.handleState)
 
 	mux.HandleFunc("/agent/navigate", s.handleNavigate)
+	mux.HandleFunc("/agent/navigate-direct", s.handleNavigateDirect)
 	mux.HandleFunc("/agent/back", s.handleBack)
 	mux.HandleFunc("/agent/forward", s.handleForward)
 	mux.HandleFunc("/agent/reload", s.handleReload)
@@ -186,6 +187,26 @@ func (s *Server) handleNavigate(w http.ResponseWriter, r *http.Request) {
 
 	defer cancel()
 	if err := s.backend.Navigate(ctx, opts.URL); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+func (s *Server) handleNavigateDirect(w http.ResponseWriter, r *http.Request) {
+	var opts NavigateOpts
+	if err := readJSON(r, &opts); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if opts.URL == "" {
+		writeError(w, http.StatusBadRequest, "url is required")
+		return
+	}
+	ctx, cancel := ctxWithTimeout(r.Context(), 30*time.Second)
+
+	defer cancel()
+	if err := s.backend.NavigateDirect(ctx, opts.URL); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

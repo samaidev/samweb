@@ -71,7 +71,7 @@ func Run(opts Options) error {
 	if err != nil {
 		return fmt.Errorf("listen ui: %w", err)
 	}
-	uiPort := uiLn.(*net.TCPAddr).Port
+	uiPort := uiLn.Addr().(*net.TCPAddr).Port
 
 	// Pick the default search engine based on user option.
 	engine := search.DefaultEngine
@@ -110,17 +110,12 @@ func Run(opts Options) error {
 	w.Bind("samwebResolve", func(input string) (string, error) {
 		return search.Resolve(input, engine), nil
 	})
-	w.Bind("__agentCallback", func(id, result, err string) {
-		// Placeholder; WebviewBackend replaces this with its own handler.
-		// We register it here too so the binding exists even if the agent
-		// backend hasn't been wired yet (defensive).
-		log.Printf("[browser] agent callback (orphan): id=%s err=%s", id, err)
-	})
 
-	// Build the agent backend and server.
+	// Build the agent backend and server. NewWebviewBackend registers the
+	// __agentCallback binding; do NOT re-register it here, otherwise the
+	// placeholder would shadow the real handler and every callback would
+	// be logged as an orphan.
 	backend := NewWebviewBackend(w)
-	// Override the __agentCallback binding with the backend's handler.
-	w.Bind("__agentCallback", backend.handleCallback)
 
 	agentSrv := agent.NewServer(opts.AgentAddr, opts.AgentToken, backend)
 	wg.Add(1)
@@ -243,14 +238,19 @@ window.__samwebAgent = (function() {
   var UI_PORT = %d;
   var UI_BASE = 'http://127.0.0.1:' + UI_PORT;
   var iframe = function() { return document.getElementById('view'); };
-  var iwin = function() { return iframe().contentWindow; };
+  var iwin = function() {
+    var f = iframe();
+    return f ? f.contentWindow : window;
+  };
   var idoc = function() {
-    try { return iframe().contentDocument; } catch (e) { return null; }
+    var f = iframe();
+    if (!f) return document;
+    try { return f.contentDocument; } catch (e) { return null; }
   };
 
   function getFrameDoc() {
     var d = idoc();
-    if (!d) throw new Error('iframe document is not accessible (cross-origin or not loaded)');
+    if (!d) throw new Error('document is not accessible (cross-origin or not loaded)');
     return d;
   }
 
@@ -278,21 +278,30 @@ window.__samwebAgent = (function() {
       }
       return { ok: true };
     },
+    navigateDirect: function(p) {
+      // Load the URL as the webview's top-level page, bypassing the
+      // iframe proxy. The agent JS (this script) is re-injected on the
+      // new page via webview.Init, so __samwebAgent survives navigation.
+      window.location.href = p.url;
+      return { ok: true };
+    },
     back: function() {
       if (typeof window.goBack === 'function') { window.goBack(); }
+      else { window.history.back(); }
       return { ok: true };
     },
     forward: function() {
       if (typeof window.goForward === 'function') { window.goForward(); }
+      else { window.history.forward(); }
       return { ok: true };
     },
     reload: function() {
       if (typeof window.reloadActive === 'function') { window.reloadActive(); }
-      else { iframe().contentWindow.location.reload(); }
+      else { window.location.reload(); }
       return { ok: true };
     },
     stop: function() {
-      try { iframe().contentWindow.stop(); } catch (e) {}
+      try { window.stop(); } catch (e) {}
       return { ok: true };
     },
 
@@ -392,6 +401,9 @@ window.__samwebAgent = (function() {
     eval: function(p) {
       var w = iwin();
       var result = w.eval(p.script);
+      if (result && typeof result.then === 'function') {
+        return result.then(function(v) { return { value: v === undefined ? null : v }; });
+      }
       return { value: result === undefined ? null : result };
     },
 
@@ -435,7 +447,12 @@ window.__samwebAgent = (function() {
       var d;
       var url = '', title = '';
       try { d = idoc(); if (d) { title = d.title || ''; } } catch (e) {}
-      try { url = iframe().src || ''; } catch (e) {}
+      var f = iframe();
+      if (f) {
+        try { url = f.src || ''; } catch (e) {}
+      } else {
+        try { url = window.location.href || ''; } catch (e) {}
+      }
       var tabs = [];
       if (typeof window.getTabsState === 'function') {
         tabs = window.getTabsState();

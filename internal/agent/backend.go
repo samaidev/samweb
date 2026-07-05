@@ -13,6 +13,11 @@ import (
 type Backend interface {
 	// Navigation
 	Navigate(ctx context.Context, url string) error
+	// NavigateDirect loads the URL as the webview's top-level page,
+	// bypassing the iframe proxy. This is needed for sites (especially
+	// SPAs) whose resources and API calls use absolute URLs that the
+	// proxy cannot transparently rewrite.
+	NavigateDirect(ctx context.Context, url string) error
 	Back(ctx context.Context) error
 	Forward(ctx context.Context) error
 	Reload(ctx context.Context) error

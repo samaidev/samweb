@@ -82,14 +82,18 @@ func (m *MockBackend) loadFakePage(url, title string) {
 // ----------------------------- Backend impl -----------------------------
 
 func (m *MockBackend) Navigate(ctx context.Context, url string) error {
-        m.mu.Lock()
-        defer m.mu.Unlock()
-        // Trim forward history if navigating from the middle.
-        m.history = m.history[:m.histIdx+1]
-        m.history = append(m.history, url)
-        m.histIdx = len(m.history) - 1
-        m.loadFakePage(url, "Example Search: "+url)
-        return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Trim forward history if navigating from the middle.
+	m.history = m.history[:m.histIdx+1]
+	m.history = append(m.history, url)
+	m.histIdx = len(m.history) - 1
+	m.loadFakePage(url, "Example Search: "+url)
+	return nil
+}
+
+func (m *MockBackend) NavigateDirect(ctx context.Context, url string) error {
+	return m.Navigate(ctx, url)
 }
 
 func (m *MockBackend) Back(ctx context.Context) error {

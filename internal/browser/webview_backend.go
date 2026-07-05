@@ -113,6 +113,9 @@ func (b *WebviewBackend) dispatchVoid(ctx context.Context, method string, params
 func (b *WebviewBackend) Navigate(ctx context.Context, url string) error {
 	return b.dispatchVoid(ctx, "navigate", map[string]string{"url": url})
 }
+func (b *WebviewBackend) NavigateDirect(ctx context.Context, url string) error {
+	return b.dispatchVoid(ctx, "navigateDirect", map[string]string{"url": url})
+}
 func (b *WebviewBackend) Back(ctx context.Context) error {
 	return b.dispatchVoid(ctx, "back", nil)
 }

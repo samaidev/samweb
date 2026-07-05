@@ -14,9 +14,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // Server is the HTTP server that exposes the proxy endpoint on its own
@@ -68,6 +71,67 @@ func (s *Server) ListenAndServe() error {
 	return nil
 }
 
+// globalJar is the shared cookie jar used by all proxy requests. It persists
+// cookies (including login session cookies) across requests so that sites
+// which require login can maintain state.
+var globalJar *cookiejar.Jar
+
+func init() {
+	j, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	if err != nil {
+		log.Printf("[proxy] cookiejar init failed: %v (continuing without jar)", err)
+	} else {
+		globalJar = j
+	}
+}
+
+// globalClient is the shared http.Client with the cookie jar and an optional
+// upstream HTTP proxy (read from the environment). It is created lazily so
+// that environment changes after import time are respected.
+var globalClient *http.Client
+
+func getClient() *http.Client {
+	if globalClient != nil {
+		return globalClient
+	}
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	// Honor upstream proxy env vars (HTTP_PROXY / HTTPS_PROXY / NO_PROXY).
+	// http.ProxyFromEnvironment reads them at request time.
+	transport.Proxy = http.ProxyFromEnvironment
+
+	c := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: transport,
+		Jar:       globalJar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			req.Header.Set("Host", req.URL.Host)
+			return nil
+		},
+	}
+	globalClient = c
+	return c
+}
+
+// ResetCookies clears the shared cookie jar. Useful when the agent wants to
+// start a fresh session (e.g. before a new login attempt).
+func ResetCookies() {
+	if globalJar == nil {
+		return
+	}
+	j, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	if err == nil {
+		globalJar = j
+		globalClient = nil
+	}
+}
+
 // ServeHTTP fetches target and streams the response to w, stripping
 // frame-busting headers. It is exported so the browser package can mount
 // the proxy on the same http.ServeMux as the UI (so the iframe is
@@ -90,16 +154,16 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, target string) {
 	}
 	copyForwardableHeaders(outReq.Header, r.Header, u.Host)
 
-	client := &http.Client{
-		Timeout: 60 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			req.Header.Set("Host", req.URL.Host)
-			return nil
-		},
+	// Merge cookies from the iframe request (if any) with the jar. The
+	// iframe sends its own cookies (scoped to 127.0.0.1); we only care
+	// about the upstream cookies stored in the jar, but we forward any
+	// Cookie header the browser sent so that test harnesses can inject
+	// cookies explicitly. The jar's cookies take precedence.
+	if cookieHeader := outReq.Header.Get("Cookie"); cookieHeader != "" {
+		// keep it; jar will also add cookies via Client.Do
 	}
+
+	client := getClient()
 	resp, err := client.Do(outReq)
 	if err != nil {
 		http.Error(w, "fetch failed: "+err.Error(), http.StatusBadGateway)
@@ -117,8 +181,27 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, target string) {
 			"cross-origin-opener-policy",
 			"cross-origin-embedder-policy",
 			"cross-origin-resource-policy",
-			"permissions-policy",
-			"set-cookie":
+			"permissions-policy":
+			// Strip frame-busting / sandbox headers so the iframe can render.
+			continue
+		case "set-cookie":
+			// The jar has already absorbed these cookies. We also re-emit
+			// them to the iframe so that any in-page JS reading
+			// document.cookie sees them, but we strip the Domain attribute
+			// (the cookie will be scoped to the proxy origin 127.0.0.1).
+			// This is a best-effort bridge between the jar and the iframe.
+			for _, v := range vals {
+				stripped := stripCookieDomain(v)
+				w.Header().Add(key, stripped)
+			}
+			continue
+		case "location":
+			// Redirects: rewrite absolute Location URLs that point back to
+			// the upstream site into proxy-relative URLs so the iframe
+			// follows them through the proxy instead of escaping.
+			for _, v := range vals {
+				w.Header().Add(key, rewriteLocation(v, u))
+			}
 			continue
 		}
 		for _, v := range vals {
@@ -131,17 +214,84 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, target string) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
+// stripCookieDomain removes the Domain= attribute from a Set-Cookie value
+// so the browser scopes the cookie to the proxy origin. Without this, the
+// browser would reject Set-Cookie with Domain=modelscope.cn coming from
+// 127.0.0.1 (cross-domain cookie rejection).
+func stripCookieDomain(setCookie string) string {
+	parts := strings.Split(setCookie, ";")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if strings.HasPrefix(strings.ToLower(t), "domain=") {
+			continue
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, ";")
+}
+
+// rewriteLocation converts an absolute redirect Location (e.g.
+// "https://www.modelscope.cn/login") into a proxy URL
+// ("/proxy?url=https://www.modelscope.cn/login") so the iframe stays
+// same-origin with the proxy. Relative Locations are returned as-is.
+func rewriteLocation(loc string, base *url.URL) string {
+	if loc == "" {
+		return loc
+	}
+	parsed, err := url.Parse(loc)
+	if err != nil {
+		return loc
+	}
+	if parsed.IsAbs() {
+		// Absolute: route through the proxy.
+		return "/proxy?url=" + url.QueryEscape(loc)
+	}
+	// Relative: resolve against base and route through proxy.
+	resolved := base.ResolveReference(parsed)
+	return "/proxy?url=" + url.QueryEscape(resolved.String())
+}
+
 // copyForwardableHeaders copies a curated subset of request headers.
 func copyForwardableHeaders(dst, src http.Header, host string) {
 	dst.Set("Host", host)
 	dst.Set("User-Agent", src.Get("User-Agent"))
-	if ua := dst.Get("User-Agent"); ua == "" {
-		dst.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 "+
-			"(KHTML, like Gecko) SamWeb/0.1 Chrome/124.0 Safari/605.1.15")
+	if ua := dst.Get("User-Agent"); ua == "" || strings.Contains(ua, "SamWeb") {
+		// Realistic Chrome UA so anti-bot systems (baxia) don't flag the
+		// custom SamWeb UA immediately.
+		dst.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "+
+			"(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 	}
-	for _, h := range []string{"Accept", "Accept-Language", "Accept-Encoding"} {
+	for _, h := range []string{"Accept", "Accept-Language", "Cookie", "Referer", "Origin"} {
 		if v := src.Get(h); v != "" {
+			// Rewrite Referer/Origin that point at the proxy to point at the
+			// upstream host so the site sees expected same-origin headers.
+			if h == "Referer" || h == "Origin" {
+				v = rewriteRefererOrigin(v, host)
+			}
 			dst.Set(h, v)
 		}
 	}
+	// Note: do NOT forward Accept-Encoding. http.Transport auto-adds gzip
+	// support and transparently decompresses; if we forward the client's
+	// Accept-Encoding the Transport won't decompress and the iframe would
+	// get raw gzip bytes.
+}
+
+// rewriteRefererOrigin rewrites a Referer/Origin header that points at the
+// proxy (http://127.0.0.1:<port>/proxy?url=...) into the upstream URL so the
+// site sees the same-origin value it expects.
+func rewriteRefererOrigin(v, host string) string {
+	if strings.Contains(v, "/proxy?url=") {
+		if idx := strings.Index(v, "url="); idx >= 0 {
+			enc := v[idx+4:]
+			if dec, err := url.QueryUnescape(enc); err == nil {
+				return dec
+			}
+		}
+	}
+	if strings.HasPrefix(v, "http://127.0.0.1") || strings.HasPrefix(v, "http://localhost") {
+		return "https://" + host + "/"
+	}
+	return v
 }
