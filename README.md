@@ -1,0 +1,161 @@
+# SamWeb
+
+A Chrome-style desktop web browser built with **Go** and the **WebKit** engine via [`webview/webview_go`](https://github.com/webview/webview_go).
+
+SamWeb packages a Chrome-lookalike UI (tab strip, omnibox, back/forward/reload, bookmarks, history, multiple search engines) into a tiny Go binary. The UI is plain HTML/CSS/JS that runs inside a WebKit webview, and pages from the real web are loaded through a built-in reverse proxy that strips `X-Frame-Options` / `Content-Security-Policy` frame-busting headers so they can be rendered inside the embedded iframe.
+
+> **Why WebKit?** `webview/webview_go` uses WebKitGTK on Linux, WebView2 (Chromium-based) on Windows, and WebKit on macOS — the same engine family that powers Safari and many modern browsers. The "most popular WebKit binding" in the Go ecosystem is exactly this one.
+
+---
+
+## Features
+
+- **Chrome-style UI** — tab strip with favicons, pill-shaped omnibox, back/forward/reload/home buttons, bookmark star.
+- **Multi-tab browsing** — open/close/switch tabs, per-tab history (Alt+Left / Alt+Right).
+- **Smart omnibox** — type a URL and it navigates directly; type anything else and it searches. Heuristics mirror Chrome's omnibox (`example.com`, `localhost:8080`, `127.0.0.1`, etc. all go directly to the URL).
+- **Search engine picker** — Google, Bing, DuckDuckGo, Baidu. The choice is remembered.
+- **Bookmarks** — click the star to bookmark, open the bookmarks popover to revisit.
+- **History** — every navigation is recorded locally (last 500 entries), viewable from the toolbar.
+- **New tab page** — colorful SamWeb logo, search box, and shortcut tiles for popular sites.
+- **Built-in proxy** — fetches remote pages on the Go side and strips frame-busting headers so they render inside the embedded iframe.
+- **Keyboard shortcuts** — `Ctrl+T` new tab, `Ctrl+W` close tab, `Ctrl+R` reload, `Ctrl+L` focus omnibox, `Ctrl+Shift+H` history.
+- **Zero runtime dependencies** — UI is embedded in the binary via `//go:embed`; the only system library required at build time is WebKitGTK.
+
+---
+
+## Project layout
+
+```
+samweb/
+├── cmd/
+│   └── samweb/
+│       └── main.go                # CLI entry point
+├── internal/
+│   ├── browser/
+│   │   ├── browser.go             # wires webview + UI server + proxy
+│   │   └── ui/
+│   │       ├── index.html         # Chrome-style UI shell
+│   │       ├── styles.css         # Chrome-lookalike styling
+│   │       └── app.js             # tab/omnibox/history/bookmark logic
+│   ├── proxy/
+│   │   └── proxy.go               # reverse proxy that strips iframe headers
+│   └── search/
+│       └── search.go              # omnibox URL-vs-search resolver
+├── go.mod
+├── go.sum
+├── README.md
+└── LICENSE
+```
+
+---
+
+## Build
+
+### Prerequisites
+
+You need **Go 1.22+** and the WebKitGTK development headers:
+
+| OS | Install command |
+|----|-----------------|
+| Debian / Ubuntu | `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev pkg-config` |
+| Fedora | `sudo dnf install webkit2gtk4.1-devel gtk3-devel pkgconf-pkg-config` |
+| Arch Linux | `sudo pacman -S webkit2gtk-4.1 gtk3 pkgconf` |
+| macOS | (uses system WebKit; no extra packages) `brew install pkg-config` |
+| Windows | (uses WebView2; runtime ships with Windows 11) |
+
+### Build from source
+
+```bash
+git clone https://github.com/samaidev/samweb.git
+cd samweb
+go build -o samweb ./cmd/samweb
+./samweb
+```
+
+### Run with options
+
+```bash
+# Use Bing as the default search engine
+./samweb --engine Bing
+
+# Larger window
+./samweb --width 1600 --height 900
+
+# Custom window title
+./samweb --title "SamWeb — Dev"
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--title` | `SamWeb` | OS window title |
+| `--width` | `1280` | Window width in pixels |
+| `--height` | `800` | Window height in pixels |
+| `--engine` | `Google` | Default search engine: `Google`, `Bing`, `DuckDuckGo`, `Baidu` |
+
+---
+
+## How it works
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                       SamWeb process                         │
+│                                                              │
+│  ┌────────────────────┐   ┌────────────────────────────────┐ │
+│  │  webview (WebKit)  │   │  internal HTTP servers         │ │
+│  │  ┌──────────────┐  │   │  ┌─────────────┐ ┌───────────┐ │ │
+│  │  │  iframe      │◀─┼───┼──│ /api/*      │ │ /proxy    │ │ │
+│  │  │  (page)      │  │   │  │ UI assets   │ │ (reverse  │ │ │
+│  │  └──────────────┘  │   │  │             │ │  proxy)   │ │ │
+│  │  Chrome-style UI   │   │  └─────────────┘ └─────┬─────┘ │ │
+│  └────────────────────┘   └────────────────────────┼───────┘ │
+└─────────────────────────────────────────────────────┼─────────┘
+                                                      ▼
+                                              remote website
+```
+
+1. **Embedded UI server** serves the Chrome-style HTML/CSS/JS on `127.0.0.1:<random>`.
+2. **Embedded proxy server** listens on `127.0.0.1:<random>` and forwards requests to remote sites. It strips `X-Frame-Options`, `Content-Security-Policy`, `Cross-Origin-*` and a few other headers so that the response can be embedded inside the iframe.
+3. The **webview** opens the UI server URL in a WebKit window. All user interactions (tab management, omnibox, bookmarks, history) are handled in JavaScript inside the webview. Page navigation goes through the proxy so the iframe can actually display remote content.
+4. The omnibox resolver (`samwebResolve` Go binding or `/api/resolve` HTTP endpoint) decides whether the user typed a URL or a search query.
+
+### Why a proxy?
+
+WebKit's iframe element honors `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors`. Most major websites send at least one of these headers, which would cause the iframe to render blank. By fetching the page through a same-origin reverse proxy that strips those headers, SamWeb can embed the page content directly.
+
+The proxy is intentionally minimal: it does not preserve cookies across requests, it does not rewrite resource URLs (so absolute URLs work; relative URLs work because the iframe document is same-origin with the proxy), and it is bound to `127.0.0.1` so it is not reachable from the network.
+
+---
+
+## Known limitations
+
+- Some sites (Google, YouTube, GitHub) use JavaScript-based frame-busting or post-login redirects that the proxy does not handle — those may show a "refused to connect" message or redirect loop.
+- Cookie persistence across proxy requests is not implemented. Sites that require login will not stay logged in.
+- Download manager is not implemented.
+- Browser-level devtools are not wired up (you can still open the webview's devtools via right-click on Linux builds if WebKitGTK was compiled with `WEBKIT_DEVELOPER_MODE=ON`).
+
+These are deliberate scope choices for the initial release. Pull requests welcome.
+
+---
+
+## Roadmap
+
+- [ ] Per-tab cookie jar in the proxy
+- [ ] Resource URL rewriting for fully correct relative-path resolution
+- [ ] Download manager
+- [ ] Per-tab webview instances (true multi-tab isolation)
+- [ ] Settings UI (homepage, theme, default engine, clear-on-exit)
+- [ ] Cross-platform builds via GitHub Actions
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+## Acknowledgements
+
+- [`webview/webview_go`](https://github.com/webview/webview_go) — the Go bindings for the excellent [`webview`](https://github.com/webview/webview) C library.
+- [`zserge/webview`](https://github.com/zserge/webview) — the original concept.
+- The Chrome UI was used as the visual reference; all assets here were reimplemented from scratch in HTML/CSS.

@@ -1,0 +1,25 @@
+# Binaries
+/samweb
+/samweb.exe
+/dist/
+/bin/
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+
+# Test / coverage
+*.test
+*.out
+coverage.txt
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
