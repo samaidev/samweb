@@ -5,7 +5,8 @@
 // The proxy is intentionally simple: it is NOT a general-purpose anonymizing
 // proxy. It only exists to make a real web browsing experience possible
 // inside an embedded webview iframe, which otherwise would be blocked by
-// X-Frame-Options / Content-Security-Policy headers served by most sites.
+// X-Frame-Options / Content-Security-Policy frame-ancestors headers served
+// by most sites.
 package proxy
 
 import (
@@ -18,13 +19,15 @@ import (
 	"time"
 )
 
-// Server is the HTTP server that exposes the proxy endpoint.
+// Server is the HTTP server that exposes the proxy endpoint on its own
+// listener. It is kept for backwards compatibility; new code should call
+// ServeHTTP directly from inside a parent http.ServeMux instead.
 type Server struct {
 	addr string
 	srv  *http.Server
 }
 
-// New constructs a proxy Server bound to the given address (e.g. "127.0.0.1:8732").
+// New constructs a standalone proxy Server bound to addr.
 func New(addr string) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
@@ -37,7 +40,14 @@ func New(addr string) *Server {
 			WriteTimeout:      120 * time.Second,
 		},
 	}
-	mux.HandleFunc("/proxy", s.handleProxy)
+	mux.HandleFunc("/proxy", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("url")
+		if target == "" {
+			http.Error(w, "missing url parameter", http.StatusBadRequest)
+			return
+		}
+		ServeHTTP(w, r, target)
+	})
 	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("pong"))
@@ -58,17 +68,11 @@ func (s *Server) ListenAndServe() error {
 	return nil
 }
 
-// handleProxy is the main proxy endpoint. It expects a ?url= query parameter
-// pointing at the absolute URL the browser wants to load. It fetches that URL
-// server-side, strips frame-busting headers, rewrites a few header values,
-// and streams the response back to the iframe.
-func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
-	target := r.URL.Query().Get("url")
-	if target == "" {
-		http.Error(w, "missing url parameter", http.StatusBadRequest)
-		return
-	}
-
+// ServeHTTP fetches target and streams the response to w, stripping
+// frame-busting headers. It is exported so the browser package can mount
+// the proxy on the same http.ServeMux as the UI (so the iframe is
+// same-origin with the parent page, which the agent JS code requires).
+func ServeHTTP(w http.ResponseWriter, r *http.Request, target string) {
 	u, err := url.Parse(target)
 	if err != nil {
 		http.Error(w, "invalid url: "+err.Error(), http.StatusBadRequest)
@@ -79,7 +83,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build the outgoing request, forwarding a curated set of headers.
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 	if err != nil {
 		http.Error(w, "build request: "+err.Error(), http.StatusBadGateway)
@@ -90,7 +93,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{
 		Timeout: 60 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Follow up to 10 redirects; rewrite the Host header on each hop.
 			if len(via) >= 10 {
 				return errors.New("stopped after 10 redirects")
 			}
@@ -105,7 +107,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy headers but drop the ones that would prevent embedding in an iframe.
 	for key, vals := range resp.Header {
 		lk := strings.ToLower(key)
 		switch lk {
@@ -118,7 +119,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"cross-origin-resource-policy",
 			"permissions-policy",
 			"set-cookie":
-			// Drop. These would either block embedding or leak cross-origin state.
 			continue
 		}
 		for _, v := range vals {
@@ -126,15 +126,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Hint to the iframe that this is a top-level navigation context.
 	w.Header().Set("X-Samweb-Proxied", "1")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
 
-// copyForwardableHeaders copies a curated subset of request headers from the
-// inbound request to the outbound one. We deliberately do not forward cookies
-// or authorization headers because the proxy is shared across all tabs.
+// copyForwardableHeaders copies a curated subset of request headers.
 func copyForwardableHeaders(dst, src http.Header, host string) {
 	dst.Set("Host", host)
 	dst.Set("User-Agent", src.Get("User-Agent"))

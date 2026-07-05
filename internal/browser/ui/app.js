@@ -554,3 +554,32 @@ function prettyURL(url) {
 function hostOf(url) {
   try { return new URL(url).host; } catch (_) { return ''; }
 }
+
+// ----------------------------- Agent exports -----------------------------
+// The agent JS bridge (defined via webview.Init in Go) calls these global
+// functions to drive the browser. We export them on window so they're
+// reachable from the eval'd bootstrap code.
+
+window.navigate = navigate;
+window.goBack = goBack;
+window.goForward = goForward;
+window.reloadActive = reloadActive;
+
+window.getActiveTabId = function() {
+  return state.activeTabId;
+};
+
+window.getTabsState = function() {
+  return state.tabs.map(t => ({ id: t.id, title: t.title, url: t.url }));
+};
+
+window.canBack = function() {
+  const t = activeTab();
+  return !!(t && t.histIndex > 0);
+};
+
+window.canForward = function() {
+  const t = activeTab();
+  return !!(t && t.histIndex < t.history.length - 1);
+};
+

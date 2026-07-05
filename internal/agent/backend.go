@@ -1,0 +1,39 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+)
+
+// Backend is the abstraction the Agent HTTP server talks to. Every method
+// corresponds 1:1 with a public API endpoint.
+//
+// Implementations live in the browser package (the real one that drives a
+// webview) and in the agent package (an in-memory mock used by tests).
+type Backend interface {
+	// Navigation
+	Navigate(ctx context.Context, url string) error
+	Back(ctx context.Context) error
+	Forward(ctx context.Context) error
+	Reload(ctx context.Context) error
+	Stop(ctx context.Context) error
+
+	// Interaction
+	Click(ctx context.Context, opts ClickOpts) error
+	Scroll(ctx context.Context, opts ScrollOpts) error
+	Type(ctx context.Context, opts TypeOpts) error
+	PressKey(ctx context.Context, opts KeyOpts) error
+
+	// Inspection
+	Eval(ctx context.Context, script string) (json.RawMessage, error)
+	Wait(ctx context.Context, selector string, timeoutMs int) error
+	Elements(ctx context.Context, selector string) ([]Element, error)
+	Element(ctx context.Context, selector string) (*Element, error)
+	State(ctx context.Context) (*State, error)
+
+	// Capture
+	Screenshot(ctx context.Context, fullPage bool) ([]byte, error)
+
+	// Lifecycle
+	Close() error
+}
