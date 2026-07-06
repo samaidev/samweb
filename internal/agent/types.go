@@ -187,4 +187,5 @@ type RawMouseOpts struct {
         Button     string  `json:"button"`     // "none", "left", "middle", "right"
         Buttons    int     `json:"buttons"`    // bitmask: 1=left, 2=right, 4=middle
         ClickCount int     `json:"clickCount"`
+        Timestamp  float64 `json:"timestamp,omitempty"` // monotonic timestamp in seconds
 }

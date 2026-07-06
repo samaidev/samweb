@@ -523,5 +523,6 @@ func (b *WebviewBackend) CDPRawMouse(ctx context.Context, opts agent.RawMouseOpt
         return c.DispatchRaw(cdp.RawMouseOpts{
                 Type: opts.Type, X: opts.X, Y: opts.Y,
                 Button: opts.Button, Buttons: opts.Buttons, ClickCount: opts.ClickCount,
+                Timestamp: opts.Timestamp,
         })
 }

@@ -86,32 +86,41 @@ type RawMouseOpts struct {
         Button     string  `json:"button"`     // "none", "left", "middle", "right"
         Buttons    int     `json:"buttons"`    // bitmask: 1=left, 2=right, 4=middle
         ClickCount int     `json:"clickCount"`
+        Timestamp  float64 `json:"timestamp,omitempty"` // monotonic timestamp in seconds
 }
 
 // DispatchRaw sends a single raw mouse event via CDP.
 func (c *Client) DispatchRaw(opts RawMouseOpts) error {
-        _, err := c.send("Input.dispatchMouseEvent", dispatchMouseParams{
+        params := dispatchMouseParams{
                 Type:       MouseEventType(opts.Type),
                 X:          opts.X,
                 Y:          opts.Y,
                 Button:     MouseButton(opts.Button),
                 Buttons:    opts.Buttons,
                 ClickCount: opts.ClickCount,
-        })
+        }
+        if opts.Timestamp > 0 {
+                params.Timestamp = opts.Timestamp
+        }
+        _, err := c.send("Input.dispatchMouseEvent", params)
         return err
 }
 
 // DispatchRawAsync sends a single raw mouse event without waiting for
 // response (for high-frequency mousemove sequences).
 func (c *Client) DispatchRawAsync(opts RawMouseOpts) error {
-        return c.sendAsync("Input.dispatchMouseEvent", dispatchMouseParams{
+        params := dispatchMouseParams{
                 Type:       MouseEventType(opts.Type),
                 X:          opts.X,
                 Y:          opts.Y,
                 Button:     MouseButton(opts.Button),
                 Buttons:    opts.Buttons,
                 ClickCount: opts.ClickCount,
-        })
+        }
+        if opts.Timestamp > 0 {
+                params.Timestamp = opts.Timestamp
+        }
+        return c.sendAsync("Input.dispatchMouseEvent", params)
 }
 
 // Drag performs a human-like drag from (x1,y1) to (x2,y2) using trusted
