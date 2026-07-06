@@ -24,20 +24,18 @@ operation.
 
 === Baxia slider note ===
 
-Aliyun baxia's NoCaptcha slider verifies `event.isTrusted` on every
-pointer event. JS-created events via `dispatchEvent` always have
-`isTrusted=false`, so baxia ignores them. This is a browser security
-hard limit — the only way to inject trusted events is at the browser
-engine level (CDP Input.dispatchMouseEvent or native WebView2 calls),
-which webview_go does not expose.
+Aliyun baxia's NoCaptcha slider uses multiple layers of detection
+(isTrusted + behavioral analysis). SamWeb supports two approaches:
 
-SamWeb's drag API still dispatches the events (in case baxia's
-detection weakens in the future, or for other captcha systems that
-don't check isTrusted), and the human-like trajectory (cubic bezier +
-jitter + smoothstep easing + random pauses) is correct. But for baxia
-specifically, the first login requires the user to drag the slider
-manually. After that, cookie persistence makes every subsequent run
-fully automatic.
+1. **Captcha-solving service (recommended)**: If samweb is started with
+   `--captcha-api-key KEY` (from 2captcha.com or capsolver.com), the
+   script calls `POST /agent/solve-captcha` which sends the captcha to
+   the service, gets a verification token back, and injects it into the
+   page. This bypasses the slider entirely. Cost: ~$1-3 per 1000 solves.
+
+2. **CDP trusted drag (fallback)**: If no API key is configured, the
+   script attempts a CDP-injected drag with human-like trajectory.
+   This may not pass baxia's behavioral analysis.
 
 Usage:
   python3 scripts/login_modelscope.py \\
@@ -245,12 +243,77 @@ def main():
     # Wait for slider iframe to load
     time.sleep(4)
 
-    # 8. Auto-detect and drag the slider inside #baxia-dialog-content iframe.
-    #    The iframe is same-origin (passport.modelscope.cn), so we can
-    #    reach into its contentDocument to find the slider handle.
-    print(f"\n[8] Attempting to auto-drag the Aliyun baxia slider (in iframe)...")
+    # 8. Try captcha-solving service first (if configured), then fall
+    #    back to CDP trusted drag.
+    slider_solved = False
+
+    # 8a. Try /agent/solve-captcha (uses 2captcha/CapSolver if API key set)
+    print(f"\n[8a] Trying captcha-solving service...")
+    try:
+        # Auto-extract Aliyun appkey from the page
+        extract_script = (
+            "(function(){"
+            "  var scripts = document.querySelectorAll('script');"
+            "  for (var i = 0; i < scripts.length; i++) {"
+            "    var t = scripts[i].textContent || '';"
+            "    var m = t.match(/appkey['\"]?\\s*[:=]\\s*['\"](FFFF[0-9A-Z]+)/);"
+            "    if (m) return m[1];"
+            "  }"
+            "  // Also check for AWSC.use with appkey"
+            "  for (var i = 0; i < scripts.length; i++) {"
+            "    var t = scripts[i].textContent || '';"
+            "    var m = t.match(/(FFFF0N[0-9]{14})/);"
+            "    if (m) return m[1];"
+            "  }"
+            "  return ''"
+            "})()"
+        )
+        s, appkey = _eval(base, args.token, extract_script)
+        # Unwrap quotes
+        while appkey.startswith('"') and appkey.endswith('"'):
+            appkey = appkey[1:-1]
+        print(f"    extracted appkey: {appkey[:30]}...")
+
+        if appkey:
+            # Call solve-captcha
+            current_url = "https://passport.modelscope.cn/mini_login.htm"
+            print(f"    calling /agent/solve-captcha (may take 10-60s)...")
+            s, body = _eval(base, args.token,
+                f"fetch('/agent/solve-captcha', {{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Bearer {args.token}'}},body:JSON.stringify({{websiteUrl:'{current_url}',websiteKey:'{appkey}'}})}}).then(r=>r.json()).then(j=>JSON.stringify(j))")
+            print(f"    solve response: {body[:300]}")
+
+            # Parse the response — if it has a token, inject it
+            if body and '"ok":true' in body.lower():
+                import json as _json
+                while body.startswith('"') and body.endswith('"'):
+                    body = body[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+                resp = _json.loads(body)
+                token = resp.get("token", "")
+                if token:
+                    print(f"    got token! injecting...")
+                    # Inject the token into the Aliyun captcha callback
+                    inject_script = (
+                        f"(function(){{"
+                        f"  var input = document.getElementById('nc_1_captcha_input');"
+                        f"  if (input) {{ input.value = '{token}'; input.dispatchEvent(new Event('change',{{bubbles:true}})) }}"
+                        f"  if (window.nc && window.nc.succeed) window.nc.succeed('{token}');"
+                        f"  if (typeof onNCSuccess === 'function') onNCSuccess('{token}');"
+                        f"  return 'injected'"
+                        f"}})()"
+                    )
+                    s, result = _eval(base, args.token, inject_script)
+                    print(f"    injection: {result[:200]}")
+                    slider_solved = True
+                    time.sleep(3)
+    except Exception as e:
+        print(f"    captcha-solving failed: {e}")
+
+    # 8b. If captcha-solving didn't work, try CDP trusted drag
+    if not slider_solved:
+        print(f"\n[8b] Falling back to CDP trusted drag...")
     slider_dragged = False
-    for attempt in range(5):
+    if not slider_solved:
+     for attempt in range(5):
         try:
             # Look for the slider handle INSIDE the baxia iframe.
             script = (

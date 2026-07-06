@@ -70,6 +70,13 @@ type Backend interface {
         // or after manually editing the cookie file.
         LoadCookies(ctx context.Context) error
 
+        // SolveAliyunCaptcha sends an Aliyun NoCaptcha captcha to a
+        // third-party solving service (2captcha/CapSolver) and returns the
+        // verification token. The token should be injected into the page's
+        // captcha callback to pass verification without dragging the slider.
+        // Returns an error if no captcha provider is configured.
+        SolveAliyunCaptcha(ctx context.Context, websiteURL, websiteKey string) (token string, err error)
+
         // Lifecycle
         Close() error
 }

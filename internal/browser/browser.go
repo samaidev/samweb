@@ -28,6 +28,7 @@ import (
         "time"
 
         "github.com/samaidev/samweb/internal/agent"
+        "github.com/samaidev/samweb/internal/captcha"
         "github.com/samaidev/samweb/internal/cdp"
         "github.com/samaidev/samweb/internal/proxy"
         "github.com/samaidev/samweb/internal/search"
@@ -56,6 +57,13 @@ type Options struct {
         // anti-bot systems like Aliyun baxia. Defaults to 9222. Set to 0
         // to disable (then /agent/drag-trusted will return an error).
         CDPPort int
+
+        // CaptchaAPIKey, if non-empty, enables /agent/solve-captcha which
+        // uses a third-party service to solve Aliyun NoCaptcha sliders.
+        // Get a key from 2captcha.com or capsolver.com.
+        CaptchaAPIKey string
+        // CaptchaProvider is "2captcha" or "capsolver". Default: "2captcha".
+        CaptchaProvider string
 }
 
 // Run starts the embedded HTTP servers and opens the webview window. It
@@ -169,6 +177,23 @@ func Run(opts Options) error {
         // placeholder would shadow the real handler and every callback would
         // be logged as an orphan.
         backend := NewWebviewBackend(w)
+
+        // Configure captcha solver if API key is provided.
+        if opts.CaptchaAPIKey != "" {
+                provider := opts.CaptchaProvider
+                if provider == "" {
+                        provider = "2captcha"
+                }
+                p := captcha.New(captcha.Config{
+                        Provider: provider,
+                        APIKey:   opts.CaptchaAPIKey,
+                        Timeout:  120 * time.Second,
+                })
+                if p != nil {
+                        backend.SetCaptchaProvider(p)
+                        log.Printf("[browser] captcha provider '%s' configured", p.Name())
+                }
+        }
 
         agentSrv := agent.NewServer(opts.AgentAddr, opts.AgentToken, backend)
         wg.Add(1)

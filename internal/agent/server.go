@@ -111,6 +111,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/reset-cookies", s.handleResetCookies)
         mux.HandleFunc("/agent/save-cookies", s.handleSaveCookies)
         mux.HandleFunc("/agent/load-cookies", s.handleLoadCookies)
+        mux.HandleFunc("/agent/solve-captcha", s.handleSolveCaptcha)
 }
 
 // ----------------------------- helpers -----------------------------
@@ -532,6 +533,48 @@ func (s *Server) handleScreenshotTrusted(w http.ResponseWriter, r *http.Request)
         w.Header().Set("Content-Length", strconv.Itoa(len(png)))
         w.WriteHeader(http.StatusOK)
         _, _ = w.Write(png)
+}
+
+// handleSolveCaptcha sends an Aliyun NoCaptcha to a third-party solving
+// service (2captcha/CapSolver) and returns the verification token. The
+// agent should then inject the token into the page's captcha callback
+// via /agent/eval.
+//
+// Request body:
+//   {"websiteUrl": "https://...", "websiteKey": "FFFF0N00000000007596"}
+//
+// Response:
+//   {"ok": true, "token": "verification-token-here"}
+func (s *Server) handleSolveCaptcha(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+                w.Header().Set("Allow", http.MethodPost)
+                writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+                return
+        }
+        var req struct {
+                WebsiteURL string `json:"websiteUrl"`
+                WebsiteKey string `json:"websiteKey"`
+        }
+        if err := readJSON(r, &req); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if req.WebsiteURL == "" || req.WebsiteKey == "" {
+                writeError(w, http.StatusBadRequest, "websiteUrl and websiteKey are required")
+                return
+        }
+        // Captcha solving can take 10-60 seconds; allow up to 3 minutes.
+        ctx, cancel := ctxWithTimeout(r.Context(), 180*time.Second)
+        defer cancel()
+        token, err := s.backend.SolveAliyunCaptcha(ctx, req.WebsiteURL, req.WebsiteKey)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, map[string]interface{}{
+                "ok":    true,
+                "token": token,
+        })
 }
 
 // Ensure method guards are applied at registration time.

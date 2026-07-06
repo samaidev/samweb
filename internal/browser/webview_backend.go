@@ -11,6 +11,7 @@ import (
         "time"
 
         "github.com/samaidev/samweb/internal/agent"
+        "github.com/samaidev/samweb/internal/captcha"
         "github.com/samaidev/samweb/internal/cdp"
         "github.com/samaidev/samweb/internal/proxy"
         "github.com/webview/webview_go"
@@ -85,6 +86,11 @@ type WebviewBackend struct {
         // and returns a clear error if CDP is not connected.
         cdpMu     sync.RWMutex
         cdpClient *cdp.Client
+
+        // captchaProvider, if non-nil, solves captchas via a third-party
+        // service (2captcha/CapSolver). Set via SetCaptchaProvider.
+        captchaMu       sync.RWMutex
+        captchaProvider captcha.Provider
 }
 
 type callbackResult struct {
@@ -324,6 +330,29 @@ func (b *WebviewBackend) ScreenshotTrusted(ctx context.Context, fullPage bool) (
 }
 
 func (b *WebviewBackend) Close() error { return nil }
+
+// SetCaptchaProvider stores the captcha-solving provider (2captcha/CapSolver).
+// Called by browser.Run if --captcha-api-key is set. Once configured, the
+// /agent/solve-captcha endpoint can solve Aliyun NoCaptcha sliders without
+// dragging — the service returns a verification token we inject.
+func (b *WebviewBackend) SetCaptchaProvider(p captcha.Provider) {
+        b.captchaMu.Lock()
+        defer b.captchaMu.Unlock()
+        b.captchaProvider = p
+}
+
+// SolveAliyunCaptcha sends an Aliyun NoCaptcha to the configured
+// captcha-solving service and returns the verification token. The token
+// should be injected into the page's captcha callback via /agent/eval.
+func (b *WebviewBackend) SolveAliyunCaptcha(ctx context.Context, websiteURL, websiteKey string) (string, error) {
+        b.captchaMu.RLock()
+        p := b.captchaProvider
+        b.captchaMu.RUnlock()
+        if p == nil {
+                return "", fmt.Errorf("no captcha provider configured — set CAPTCHA_API_KEY env var or --captcha-api-key flag")
+        }
+        return p.SolveAliyun(ctx, websiteURL, websiteKey)
+}
 
 // ResetCookies clears both the proxy's cookie jar AND the CDP browser
 // cookie store (where navigate-direct cookies live). Call before a
