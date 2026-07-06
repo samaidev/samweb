@@ -85,6 +85,11 @@ func (c *Client) MouseUp(x, y float64) error {
 // holdAtEndMs is the time to hold the button at the end before release
 // (0 = default 50-200ms).
 //
+// mousedown and mouseup are sent synchronously (so we know they were
+// received before continuing); mousemove events are sent fire-and-forget
+// (sendAsync) because waiting for each response would make a 100-step
+// drag take 30+ seconds.
+//
 // All timing is implemented via time.Sleep on the calling goroutine, so
 // Drag blocks for the full duration. Call it from a goroutine if you
 // need async behavior.
@@ -120,7 +125,7 @@ func (c *Client) Drag(x1, y1, x2, y2 float64, durationMs, steps, jitter, holdAtE
                 return x, y
         }
 
-        // mousedown (trusted)
+        // mousedown (trusted, synchronous so we know it was received)
         if err := c.MouseDown(x1, y1); err != nil {
                 return err
         }
@@ -135,25 +140,31 @@ func (c *Client) Drag(x1, y1, x2, y2 float64, durationMs, steps, jitter, holdAtE
                 // smoothstep easing
                 eased := t * t * (3 - 2*t)
                 x, y := bezierPoint(eased)
-                if err := c.MouseMove(x, y); err != nil {
+                // fire-and-forget mousemove (no waiting for response)
+                if err := c.sendAsync("Input.dispatchMouseEvent", dispatchMouseParams{
+                        Type:    MouseEventMouseMoved,
+                        X:       x,
+                        Y:       y,
+                        Buttons: 1, // left button held
+                }); err != nil {
                         return err
                 }
                 // randomized inter-event delay
-                jitter := time.Duration(randInt64(int64(stepDelay/2))) * time.Millisecond
+                jitterDur := time.Duration(randInt64(int64(stepDelay/2))) * time.Millisecond
                 // occasional pause (5% chance, 30-80ms)
                 if randInt64(100) < 5 {
-                        jitter += time.Duration(30+randInt64(50)) * time.Millisecond
+                        jitterDur += time.Duration(30+randInt64(50)) * time.Millisecond
                 }
-                time.Sleep(stepDelay + jitter)
+                time.Sleep(stepDelay + jitterDur)
         }
 
-        // final move to exact target
+        // final move to exact target (sync to ensure it lands before mouseup)
         if err := c.MouseMove(x2, y2); err != nil {
                 return err
         }
         // hold at end
         time.Sleep(time.Duration(holdAtEndMs) * time.Millisecond)
-        // mouseup
+        // mouseup (sync)
         if err := c.MouseUp(x2, y2); err != nil {
                 return err
         }
