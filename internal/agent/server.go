@@ -390,8 +390,9 @@ func (s *Server) handleDragTrusted(w http.ResponseWriter, r *http.Request) {
         // CDP coordinates are absolute page coords and the caller is expected
         // to have resolved selectors via /agent/elements first).
         // We accept (0,0) as a valid coordinate.
-        // Drag can take 1-2 seconds; allow up to 30s for slow drags.
-        ctx, cancel := ctxWithTimeout(r.Context(), 30*time.Second)
+        // Drag can take up to a few seconds (duration + holdAtEnd), but CDP
+        // WebSocket writes can be slow under load; allow up to 120s.
+        ctx, cancel := ctxWithTimeout(r.Context(), 120*time.Second)
 
         defer cancel()
         if err := s.backend.DragTrusted(ctx, opts); err != nil {

@@ -211,6 +211,10 @@ func (c *Client) sendAsync(method string, params interface{}) error {
         if c.conn == nil {
                 return fmt.Errorf("cdp: not connected")
         }
+        // Set a write deadline so a stalled WebSocket doesn't block the
+        // drag goroutine forever.
+        _ = c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+        defer c.conn.SetWriteDeadline(time.Time{}) // reset
         payload := struct {
                 ID     int64       `json:"id"`
                 Method string      `json:"method"`
