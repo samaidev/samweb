@@ -141,23 +141,6 @@ func Run(opts Options) error {
 
         w.Navigate(uiURL)
 
-        // Diagnostic: after a short delay, use Dispatch (thread-safe) to run
-        // Eval on the webview's main thread. If the window title changes to
-        // "DISPATCH_WORKS", we know Dispatch + Eval work; if it stays "SamWeb",
-        // even Dispatch is broken.
-        go func() {
-                time.Sleep(5 * time.Second)
-                log.Printf("[browser] diagnostic: Dispatch test (thread-safe)")
-                w.Dispatch(func() {
-                        log.Printf("[browser] diagnostic: Dispatch callback running on main thread")
-                        w.Eval(fmt.Sprintf(`document.title = 'DISPATCH_WORKS_%d';`, uiPort))
-                        log.Printf("[browser] diagnostic: Eval inside Dispatch sent")
-                        w.Eval(`try { window.__agentCallback("startup-ping", "pong", ""); } catch(e) {}`)
-                        log.Printf("[browser] diagnostic: callback Eval inside Dispatch sent")
-                })
-                log.Printf("[browser] diagnostic: Dispatch posted")
-        }()
-
         w.Run()
 
         // After the window closes, shut down the servers so the process can
