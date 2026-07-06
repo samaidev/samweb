@@ -81,7 +81,23 @@ func (b *WebviewBackend) dispatch(ctx context.Context, method string, params int
                 }
                 paramsJSON = string(bb)
         }
-        js := fmt.Sprintf(`window.__samwebAgent.dispatch(%q, %q, %s);`, id, method, paramsJSON)
+        // Wrap the dispatch call in try/catch so that if __samwebAgent is
+        // undefined (Init JS didn't execute, e.g. on Windows when
+        // AddScriptToExecuteOnDocumentCreated fails silently), we get an
+        // immediate error back via __agentCallback instead of hanging until
+        // the request timeout. This makes Windows-specific Init failures
+        // diagnosable.
+        js := fmt.Sprintf(`(function(){
+  try {
+    if (typeof window.__samwebAgent === 'undefined') {
+      window.__agentCallback(%q, '', 'window.__samwebAgent is not defined (Init JS did not execute)');
+      return;
+    }
+    window.__samwebAgent.dispatch(%q, %q, %s);
+  } catch (e) {
+    window.__agentCallback(%q, '', 'dispatch error: ' + (e && e.message ? e.message : String(e)));
+  }
+})();`, id, id, method, paramsJSON, id)
         b.w.Eval(js)
 
         select {
