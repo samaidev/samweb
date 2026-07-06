@@ -265,6 +265,10 @@ func (m *MockBackend) CDPRawMouse(ctx context.Context, opts RawMouseOpts) error 
         return fmt.Errorf("CDPRawMouse not supported on mock backend")
 }
 
+func (m *MockBackend) BreakthroughSlider(ctx context.Context) (string, bool, error) {
+        return "", false, fmt.Errorf("BreakthroughSlider not supported on mock backend")
+}
+
 func (m *MockBackend) Eval(ctx context.Context, script string) (json.RawMessage, error) {
         m.mu.Lock()
         defer m.mu.Unlock()

@@ -51,6 +51,11 @@ type Backend interface {
         // CDPRawMouse sends a single CDP Input.dispatchMouseEvent.
         CDPRawMouse(ctx context.Context, opts RawMouseOpts) error
 
+        // BreakthroughSlider automatically detects and bypasses slider
+        // captchas on the current page using the breakthrough framework.
+        // Returns the challenge name and success status.
+        BreakthroughSlider(ctx context.Context) (challenge string, success bool, err error)
+
         // Inspection
         Eval(ctx context.Context, script string) (json.RawMessage, error)
         Wait(ctx context.Context, selector string, timeoutMs int) error

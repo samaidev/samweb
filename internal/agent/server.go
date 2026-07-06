@@ -107,6 +107,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/network/requests", s.handleNetworkRequests)
         mux.HandleFunc("/agent/network/clear", s.handleNetworkClear)
         mux.HandleFunc("/agent/cdp-mouse", s.handleCDPRawMouse)
+        mux.HandleFunc("/agent/breakthrough", s.handleBreakthrough)
 
         mux.HandleFunc("/agent/eval", s.handleEval)
         mux.HandleFunc("/agent/wait", s.handleWait)
@@ -465,7 +466,6 @@ func (s *Server) handleNetworkClear(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCDPRawMouse sends a single CDP Input.dispatchMouseEvent.
-// Body: {"type":"mousePressed","x":21,"y":245,"button":"left","buttons":1,"clickCount":1}
 func (s *Server) handleCDPRawMouse(w http.ResponseWriter, r *http.Request) {
         var opts RawMouseOpts
         if err := readJSON(r, &opts); err != nil {
@@ -479,6 +479,26 @@ func (s *Server) handleCDPRawMouse(w http.ResponseWriter, r *http.Request) {
                 return
         }
         writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleBreakthrough automatically detects and bypasses slider captchas.
+// POST /agent/breakthrough → {"challenge":"aliyun-baxia-slider","success":true}
+func (s *Server) handleBreakthrough(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 60*time.Second)
+        defer cancel()
+        challenge, success, err := s.backend.BreakthroughSlider(ctx)
+        if err != nil {
+                writeJSON(w, http.StatusOK, map[string]interface{}{
+                        "challenge": challenge,
+                        "success":   success,
+                        "error":     err.Error(),
+                })
+                return
+        }
+        writeJSON(w, http.StatusOK, map[string]interface{}{
+                "challenge": challenge,
+                "success":   success,
+        })
 }
 
 func (s *Server) handleEval(w http.ResponseWriter, r *http.Request) {

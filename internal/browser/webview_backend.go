@@ -11,6 +11,7 @@ import (
         "time"
 
         "github.com/samaidev/samweb/internal/agent"
+        "github.com/samaidev/samweb/internal/breakthrough"
         "github.com/samaidev/samweb/internal/cdp"
         "github.com/samaidev/samweb/internal/proxy"
         "github.com/webview/webview_go"
@@ -525,4 +526,43 @@ func (b *WebviewBackend) CDPRawMouse(ctx context.Context, opts agent.RawMouseOpt
                 Button: opts.Button, Buttons: opts.Buttons, ClickCount: opts.ClickCount,
                 Timestamp: opts.Timestamp,
         })
+}
+
+// BreakthroughSlider automatically detects and bypasses slider captchas.
+func (b *WebviewBackend) BreakthroughSlider(ctx context.Context) (string, bool, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return "", false, fmt.Errorf("CDP client not connected")
+        }
+
+        // Build the breakthrough environment
+        env := &breakthrough.Env{
+                CDPMouse: func(ctx context.Context, eventType string, x, y float64, button string, buttons, clickCount int) error {
+                        return c.DispatchRaw(cdp.RawMouseOpts{
+                                Type: eventType, X: x, Y: y,
+                                Button: button, Buttons: buttons, ClickCount: clickCount,
+                        })
+                },
+                Eval: func(ctx context.Context, script string) (string, error) {
+                        out, err := b.dispatch(ctx, "eval", map[string]string{"script": script})
+                        if err != nil {
+                                return "", err
+                        }
+                        return out, nil
+                },
+                Screenshot: func(ctx context.Context) ([]byte, error) {
+                        return c.Screenshot(false)
+                },
+                SaveCookies: func(ctx context.Context) error {
+                        return b.SaveCookies(ctx)
+                },
+                LoadCookies: func(ctx context.Context) error {
+                        return b.LoadCookies(ctx)
+                },
+        }
+
+        mgr := breakthrough.NewManager()
+        return mgr.DetectAndBypass(ctx, env)
 }
