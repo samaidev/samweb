@@ -141,19 +141,21 @@ func Run(opts Options) error {
 
         w.Navigate(uiURL)
 
-        // Diagnostic: after a short delay, Eval a JS that sets document.title.
-        // If the window title changes to "EVAL_WORKS_<port>", we know Eval
-        // works on this platform. If it stays "SamWeb", Eval is broken.
+        // Diagnostic: after a short delay, use Dispatch (thread-safe) to run
+        // Eval on the webview's main thread. If the window title changes to
+        // "DISPATCH_WORKS", we know Dispatch + Eval work; if it stays "SamWeb",
+        // even Dispatch is broken.
         go func() {
                 time.Sleep(5 * time.Second)
-                log.Printf("[browser] diagnostic: Eval document.title test")
-                w.Eval(fmt.Sprintf(`document.title = 'EVAL_WORKS_%d';`, uiPort))
-                log.Printf("[browser] diagnostic: Eval sent")
-                // Also test direct __agentCallback
-                time.Sleep(2 * time.Second)
-                log.Printf("[browser] diagnostic: direct __agentCallback test")
-                w.Eval(`try { window.__agentCallback("startup-ping", "pong", ""); } catch(e) { console.log('callback err: ' + e); }`)
-                log.Printf("[browser] diagnostic: direct callback Eval sent")
+                log.Printf("[browser] diagnostic: Dispatch test (thread-safe)")
+                w.Dispatch(func() {
+                        log.Printf("[browser] diagnostic: Dispatch callback running on main thread")
+                        w.Eval(fmt.Sprintf(`document.title = 'DISPATCH_WORKS_%d';`, uiPort))
+                        log.Printf("[browser] diagnostic: Eval inside Dispatch sent")
+                        w.Eval(`try { window.__agentCallback("startup-ping", "pong", ""); } catch(e) {}`)
+                        log.Printf("[browser] diagnostic: callback Eval inside Dispatch sent")
+                })
+                log.Printf("[browser] diagnostic: Dispatch posted")
         }()
 
         w.Run()

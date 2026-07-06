@@ -101,15 +101,15 @@ func (b *WebviewBackend) dispatch(ctx context.Context, method string, params int
     window.__agentCallback(%q, '', 'dispatch error: ' + (e && e.message ? e.message : String(e)));
   }
 })();`, id, id, method, paramsJSON, id)
-        log.Printf("[backend] dispatch id=%s method=%s -> Eval", id, method)
-        b.w.Eval(js)
-        log.Printf("[backend] dispatch id=%s method=%s Eval returned", id, method)
-        // Diagnostic: also send a direct ping to __agentCallback to test if
-        // the Bind mechanism works independently of __samwebAgent. If
-        // handleCallback receives "ping-<id>", we know Eval + Bind work and
-        // the problem is __samwebAgent; if not, Eval or Bind is broken.
-        pingJS := fmt.Sprintf(`try { window.__agentCallback("ping-%s", "pong", ""); } catch(e) {}`, id)
-        b.w.Eval(pingJS)
+        log.Printf("[backend] dispatch id=%s method=%s -> Dispatch+Eval", id, method)
+        // Use Dispatch to ensure the Eval runs on the webview's main thread.
+        // Without this, on Windows the Eval may be called from a different
+        // goroutine / OS thread than the one that owns the HWND, and
+        // ExecuteScript may silently fail to execute.
+        b.w.Dispatch(func() {
+                b.w.Eval(js)
+        })
+        log.Printf("[backend] dispatch id=%s method=%s Dispatch posted", id, method)
 
         select {
         case r := <-ch:
