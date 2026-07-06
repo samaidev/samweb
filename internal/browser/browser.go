@@ -699,8 +699,21 @@ window.__samwebAgent = (function() {
 
         var opts = { bubbles: true, cancelable: true, view: iframeWin,
                      clientX: x1 + evOffsetX, clientY: y1 + evOffsetY };
+        // Pointer events are the modern equivalent of mouse events and
+        // are what most modern sliders (including Aliyun baxia's) listen
+        // for. We dispatch BOTH pointer and mouse events for maximum
+        // compatibility.
+        var pointerOpts = Object.assign({
+          pointerId: 1,
+          pointerType: 'mouse',
+          isPrimary: true,
+          width: 1, height: 1,
+          pressure: 0.5
+        }, opts);
 
-        // mousedown
+        // mousedown + pointerdown
+        target.dispatchEvent(new PointerEvent('pointerdown',
+          Object.assign({button: 0}, pointerOpts)));
         target.dispatchEvent(new MouseEvent('mousedown',
           Object.assign({button: 0}, opts)));
 
@@ -708,16 +721,18 @@ window.__samwebAgent = (function() {
         function nextMove() {
           if (i >= steps) {
             // Final move to exact (x2, y2) so we land on the target
-            target.dispatchEvent(new MouseEvent('mousemove',
-              Object.assign({button: 0, clientX: x2 + evOffsetX, clientY: y2 + evOffsetY}, opts)));
+            var finalOpts = Object.assign({button: 0, clientX: x2 + evOffsetX, clientY: y2 + evOffsetY}, opts);
+            var finalPointer = Object.assign({}, pointerOpts, {clientX: x2 + evOffsetX, clientY: y2 + evOffsetY});
+            target.dispatchEvent(new PointerEvent('pointermove', finalPointer));
+            target.dispatchEvent(new MouseEvent('mousemove', finalOpts));
             // Hold at end
             setTimeout(function() {
-              // mouseup
-              target.dispatchEvent(new MouseEvent('mouseup',
-                Object.assign({button: 0, clientX: x2 + evOffsetX, clientY: y2 + evOffsetY}, opts)));
+              // mouseup + pointerup
+              target.dispatchEvent(new PointerEvent('pointerup',
+                Object.assign({button: 0}, finalPointer)));
+              target.dispatchEvent(new MouseEvent('mouseup', finalOpts));
               // Final click (some sliders require it)
-              target.dispatchEvent(new MouseEvent('click',
-                Object.assign({button: 0, clientX: x2 + evOffsetX, clientY: y2 + evOffsetY}, opts)));
+              target.dispatchEvent(new MouseEvent('click', finalOpts));
               resolve({ ok: true, from: {x: x1, y: y1}, to: {x: x2, y: y2},
                         duration: duration, steps: steps });
             }, holdAtEnd);
@@ -727,8 +742,10 @@ window.__samwebAgent = (function() {
           // Ease: humans accelerate then decelerate. Use a smoothstep.
           var eased = t * t * (3 - 2 * t);
           var pt = bezierPoint(eased);
-          target.dispatchEvent(new MouseEvent('mousemove',
-            Object.assign({button: 0, clientX: pt.x + evOffsetX, clientY: pt.y + evOffsetY}, opts)));
+          var moveOpts = Object.assign({button: 0, clientX: pt.x + evOffsetX, clientY: pt.y + evOffsetY}, opts);
+          var movePointer = Object.assign({}, pointerOpts, {clientX: pt.x + evOffsetX, clientY: pt.y + evOffsetY});
+          target.dispatchEvent(new PointerEvent('pointermove', movePointer));
+          target.dispatchEvent(new MouseEvent('mousemove', moveOpts));
           i++;
           // Inter-event delay: humans are not perfectly regular.
           var delay = (duration / steps) + (Math.random() - 0.5) * 8;
