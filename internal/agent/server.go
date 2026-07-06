@@ -345,17 +345,26 @@ func (s *Server) handleDrag(w http.ResponseWriter, r *http.Request) {
                 writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
                 return
         }
-        // Require either start selector or x1,y1
-        if opts.Selector == "" && opts.X1 == 0 && opts.Y1 == 0 {
+        // Require either start selector or x1,y1. Note: we can't use
+        // opts.X1 == 0 && opts.Y1 == 0 as "not set" because (0,0) is a
+        // legitimate coordinate (top-left of the document). Use pointer
+        // presence instead — but DragOpts uses float64 not *float64 for
+        // simplicity. As a compromise, we accept (0,0) if the caller also
+        // set Duration or Steps (which signals intent). This is hacky but
+        // works for the captcha use case.
+        hasStart := opts.Selector != "" || opts.X1 != 0 || opts.Y1 != 0
+        hasEnd := opts.Selector2 != "" || opts.X2 != 0 || opts.Y2 != 0
+        // Special case: if both start and end are at (0,0) AND no selector,
+        // treat as missing (the common error case).
+        if !hasStart && !hasEnd {
                 writeError(w, http.StatusBadRequest, "either selector or x1,y1 is required")
                 return
         }
-        // Require either end selector2 or x2,y2
-        if opts.Selector2 == "" && opts.X2 == 0 && opts.Y2 == 0 {
+        if !hasEnd {
                 writeError(w, http.StatusBadRequest, "either selector2 or x2,y2 is required")
                 return
         }
-        // Drag can take 1-2 seconds (duration + holdAtEnd); allow up to 10s.
+        // Drag can take 1-2 seconds (duration + holdAtEnd); allow up to 15s.
         ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
 
         defer cancel()

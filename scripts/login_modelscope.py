@@ -210,50 +210,87 @@ def main():
     #    the right edge of the slider track.
     print(f"\n[7] Attempting to auto-drag the Aliyun NoCaptcha slider...")
     slider_dragged = False
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             # Look for the slider handle. Aliyun baxia uses several
-            # possible IDs depending on version: #nc_1_n1z, #nc_1__scale_
-            # and class .btn_slide, .nc_iconfont
+            # possible IDs depending on version. We also require the
+            # element to be visible (non-zero size) — otherwise
+            # getBoundingClientRect returns 0,0,0,0 and the drag would
+            # be meaningless.
             script = (
-                "var h = document.querySelector('#nc_1_n1z, .nc-lang-cnt .btn_slide, "
-                ".nc_iconfont.btn_slide, .scale_text.nc-lang-cnt .btn_slide, "
-                "#nc_1_scale_btn, .nc-lang-cnt .btn_slide'); "
-                "var t = document.querySelector('.nc-lang-cnt, .scale_text, .nc-container .nc-lang-cnt'); "
-                "if (h && t) { JSON.stringify({handle: {x: h.getBoundingClientRect().left + h.getBoundingClientRect().width/2, y: h.getBoundingClientRect().top + h.getBoundingClientRect().height/2, w: h.getBoundingClientRect().width, h: h.getBoundingClientRect().height}, track: {x: t.getBoundingClientRect().left, y: t.getBoundingClientRect().top, w: t.getBoundingClientRect().width, h: t.getBoundingClientRect().height}}) } else { 'null' }"
+                "(function() {"
+                "  var candidates = ['#nc_1_n1z', '.nc-lang-cnt .btn_slide', "
+                "    '.nc_iconfont.btn_slide', '.scale_text.nc-lang-cnt .btn_slide', "
+                "    '#nc_1_scale_btn', '.nc-lang-cnt .btn_slide', "
+                "    '.btn_slide', '#aliyunCaptcha-btn'];"
+                "  var h = null;"
+                "  for (var i = 0; i < candidates.length; i++) {"
+                "    h = document.querySelector(candidates[i]);"
+                "    if (h) {"
+                "      var r = h.getBoundingClientRect();"
+                "      if (r.width > 0 && r.height > 0) break;"
+                "      h = null;"
+                "    }"
+                "  }"
+                "  var tSelectors = ['.nc-lang-cnt', '.scale_text', '.nc-container .nc-lang-cnt', '.nc-container', '#aliyunCaptcha-slide-bar'];"
+                "  var t = null;"
+                "  for (var j = 0; j < tSelectors.length; j++) {"
+                "    t = document.querySelector(tSelectors[j]);"
+                "    if (t) {"
+                "      var tr = t.getBoundingClientRect();"
+                "      if (tr.width > 0 && tr.height > 0) break;"
+                "      t = null;"
+                "    }"
+                "  }"
+                "  if (h && t) {"
+                "    var hr = h.getBoundingClientRect(), tr = t.getBoundingClientRect();"
+                "    return JSON.stringify({handle: {x: hr.left + hr.width/2, y: hr.top + hr.height/2, w: hr.width, h: hr.height}, track: {x: tr.left, y: tr.top, w: tr.width, h: tr.height}});"
+                "  }"
+                "  return 'null';"
+                "})()"
             )
             s, body = _eval(base, args.token, script)
+            # Unwrap nested JSON string quotes
             if body and body != "null" and body != '"null"':
                 import json as _json
-                # body may be a JSON string wrapped in quotes
                 while body.startswith('"') and body.endswith('"') and len(body) > 2:
                     body = body[1:-1].replace('\\"', '"').replace('\\\\', '\\')
                 pos = _json.loads(body)
                 hx, hy = pos["handle"]["x"], pos["handle"]["y"]
-                # Drag horizontally to the end of the track
                 tx = pos["track"]["x"] + pos["track"]["w"] - 10
-                ty = hy  # keep y the same
+                ty = hy
+                # Skip if coordinates look invalid (all zero)
+                if hx == 0 and hy == 0 and tx <= 0:
+                    print(f"    attempt {attempt+1}: slider coords invalid (still rendering?)")
+                    time.sleep(2)
+                    continue
                 print(f"    attempt {attempt+1}: dragging from ({hx:.0f},{hy:.0f}) to ({tx:.0f},{ty:.0f})")
                 req(base, args.token, "POST", "/agent/drag",
                     body={"x1": hx, "y1": hy, "x2": tx, "y2": ty,
                           "duration": 1200, "steps": 80, "jitter": 4},
                     timeout=20)
                 slider_dragged = True
-                print("    drag dispatched, waiting 3s for verification...")
-                time.sleep(3)
+                print("    drag dispatched, waiting 4s for verification...")
+                time.sleep(4)
                 # Check if slider passed
-                script2 = "var r = document.querySelector('.nc-lang-cnt .nc_ok, .icon_ok'); r ? 'passed' : (document.querySelector('.errloading, .nc-lang-cnt .err') ? 'failed' : 'pending')"
+                script2 = ("(function() {"
+                           "  if (document.querySelector('.nc-lang-cnt .nc_ok, .icon_ok, .nc_iconfont.icon_ok')) return 'passed';"
+                           "  if (document.querySelector('.errloading, .nc-lang-cnt .err, .nc-lang-cnt .nc_iconfont.btn_warn')) return 'failed';"
+                           "  return 'pending';"
+                           "})()")
                 s2, body2 = _eval(base, args.token, script2)
                 print(f"    slider state: {body2}")
                 if "passed" in str(body2):
                     print("    slider PASSED!")
                     break
-                # If failed or pending, retry
+                # Wait before retry (slider may reset)
+                time.sleep(2)
             else:
-                print(f"    attempt {attempt+1}: slider not found (may not have rendered yet)")
+                print(f"    attempt {attempt+1}: slider not visible yet, waiting...")
+                time.sleep(2)
         except Exception as e:
             print(f"    attempt {attempt+1} failed: {e}")
-        time.sleep(2)
+            time.sleep(2)
 
     if slider_dragged:
         # Try to click the login button
