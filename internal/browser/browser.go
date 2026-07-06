@@ -711,11 +711,20 @@ window.__samwebAgent = (function() {
           pressure: 0.5
         }, opts);
 
-        // mousedown + pointerdown
+        // mousedown + pointerdown on the target (slider handle)
         target.dispatchEvent(new PointerEvent('pointerdown',
           Object.assign({button: 0}, pointerOpts)));
         target.dispatchEvent(new MouseEvent('mousedown',
           Object.assign({button: 0}, opts)));
+
+        // Slider JS often uses setPointerCapture on pointerdown, which
+        // redirects subsequent pointer events to the capturing element.
+        // But many sliders ALSO listen on document/window for pointermove
+        // during drag. To cover both cases, we dispatch pointermove on
+        // BOTH the target AND the document.
+        var moveTarget = target;          // for setPointerCapture case
+        var docTarget = iframeDoc;        // for document-level listeners
+        var winTarget = iframeWin;        // for window-level listeners
 
         var i = 0;
         function nextMove() {
@@ -723,16 +732,24 @@ window.__samwebAgent = (function() {
             // Final move to exact (x2, y2) so we land on the target
             var finalOpts = Object.assign({button: 0, clientX: x2 + evOffsetX, clientY: y2 + evOffsetY}, opts);
             var finalPointer = Object.assign({}, pointerOpts, {clientX: x2 + evOffsetX, clientY: y2 + evOffsetY});
-            target.dispatchEvent(new PointerEvent('pointermove', finalPointer));
-            target.dispatchEvent(new MouseEvent('mousemove', finalOpts));
+            moveTarget.dispatchEvent(new PointerEvent('pointermove', finalPointer));
+            docTarget.dispatchEvent(new PointerEvent('pointermove', finalPointer));
+            winTarget.dispatchEvent(new PointerEvent('pointermove', finalPointer));
+            moveTarget.dispatchEvent(new MouseEvent('mousemove', finalOpts));
+            docTarget.dispatchEvent(new MouseEvent('mousemove', finalOpts));
             // Hold at end
             setTimeout(function() {
-              // mouseup + pointerup
-              target.dispatchEvent(new PointerEvent('pointerup',
+              // mouseup + pointerup on all targets
+              moveTarget.dispatchEvent(new PointerEvent('pointerup',
                 Object.assign({button: 0}, finalPointer)));
-              target.dispatchEvent(new MouseEvent('mouseup', finalOpts));
+              docTarget.dispatchEvent(new PointerEvent('pointerup',
+                Object.assign({button: 0}, finalPointer)));
+              winTarget.dispatchEvent(new PointerEvent('pointerup',
+                Object.assign({button: 0}, finalPointer)));
+              moveTarget.dispatchEvent(new MouseEvent('mouseup', finalOpts));
+              docTarget.dispatchEvent(new MouseEvent('mouseup', finalOpts));
               // Final click (some sliders require it)
-              target.dispatchEvent(new MouseEvent('click', finalOpts));
+              moveTarget.dispatchEvent(new MouseEvent('click', finalOpts));
               resolve({ ok: true, from: {x: x1, y: y1}, to: {x: x2, y: y2},
                         duration: duration, steps: steps });
             }, holdAtEnd);
@@ -744,8 +761,11 @@ window.__samwebAgent = (function() {
           var pt = bezierPoint(eased);
           var moveOpts = Object.assign({button: 0, clientX: pt.x + evOffsetX, clientY: pt.y + evOffsetY}, opts);
           var movePointer = Object.assign({}, pointerOpts, {clientX: pt.x + evOffsetX, clientY: pt.y + evOffsetY});
-          target.dispatchEvent(new PointerEvent('pointermove', movePointer));
-          target.dispatchEvent(new MouseEvent('mousemove', moveOpts));
+          moveTarget.dispatchEvent(new PointerEvent('pointermove', movePointer));
+          docTarget.dispatchEvent(new PointerEvent('pointermove', movePointer));
+          winTarget.dispatchEvent(new PointerEvent('pointermove', movePointer));
+          moveTarget.dispatchEvent(new MouseEvent('mousemove', moveOpts));
+          docTarget.dispatchEvent(new MouseEvent('mousemove', moveOpts));
           i++;
           // Inter-event delay: humans are not perfectly regular.
           var delay = (duration / steps) + (Math.random() - 0.5) * 8;
