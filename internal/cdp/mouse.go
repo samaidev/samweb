@@ -140,11 +140,15 @@ func (c *Client) Drag(x1, y1, x2, y2 float64, durationMs, steps, jitter, holdAtE
                 // smoothstep easing
                 eased := t * t * (3 - 2*t)
                 x, y := bezierPoint(eased)
-                // fire-and-forget mousemove (no waiting for response)
+                // fire-and-forget mousemove (no waiting for response).
+                // During an active drag (button held), buttons=1 (left button
+                // bitmask) but button="none" (no button *change* on move).
+                // This is what real Chrome does.
                 if err := c.sendAsync("Input.dispatchMouseEvent", dispatchMouseParams{
                         Type:    MouseEventMouseMoved,
                         X:       x,
                         Y:       y,
+                        Button:  MouseButtonNone,
                         Buttons: 1, // left button held
                 }); err != nil {
                         return err
