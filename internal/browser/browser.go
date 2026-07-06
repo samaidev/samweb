@@ -629,7 +629,10 @@ window.__samwebAgent = (function() {
           x1 = r1.left + r1.width / 2 + iframeOffsetX;
           y1 = r1.top + r1.height / 2 + iframeOffsetY;
         } else if (p.x1 !== undefined && p.y1 !== undefined) {
-          x1 = p.x1; y1 = p.y1; // caller-provided, assumed top-doc
+          // Caller-provided coords. If iframeSelector is set, treat as
+          // iframe-local and add iframeOffset.
+          x1 = p.x1 + (p.iframeSelector ? iframeOffsetX : 0);
+          y1 = p.y1 + (p.iframeSelector ? iframeOffsetY : 0);
         } else {
           throw new Error('drag requires selector or x1,y1');
         }
@@ -641,7 +644,11 @@ window.__samwebAgent = (function() {
           x2 = r2.left + r2.width / 2 + iframeOffsetX;
           y2 = r2.top + r2.height / 2 + iframeOffsetY;
         } else if (p.x2 !== undefined && p.y2 !== undefined) {
-          x2 = p.x2; y2 = p.y2; // caller-provided, assumed top-doc
+          // Caller-provided coords. If iframeSelector is set, treat as
+          // iframe-local and add iframeOffset to get top-doc coords.
+          // Otherwise treat as top-doc directly.
+          x2 = p.x2 + (p.iframeSelector ? iframeOffsetX : 0);
+          y2 = p.y2 + (p.iframeSelector ? iframeOffsetY : 0);
         } else {
           throw new Error('drag requires selector2 or x2,y2');
         }
