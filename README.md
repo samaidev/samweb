@@ -231,30 +231,45 @@ full workflow:
 
 ### Baxia slider limitation
 
-Aliyun baxia's NoCaptcha checks `event.isTrusted` on every pointer
-event. JS-created events via `dispatchEvent` always have
-`isTrusted=false` (this is a browser security invariant), so baxia
-ignores them. The drag API is implemented correctly and the trajectory
-is indistinguishable from a human's, but baxia rejects it because the
-events are untrusted.
+Aliyun baxia's NoCaptcha uses multiple layers of detection:
 
-The **only** way to inject trusted events is at the browser engine
-level:
-- Chrome DevTools Protocol's `Input.dispatchMouseEvent` (what
-  Puppeteer/Playwright use under the hood)
-- WebView2's `ICoreWebView2Controller`'s native input methods
+1. **`event.isTrusted` check** — JS-created events via `dispatchEvent`
+   always have `isTrusted=false`. **SOLVED**: SamWeb now connects to
+   WebView2's CDP endpoint (via `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=
+   --remote-debugging-port=9222`) and uses `Input.dispatchMouseEvent`
+   to inject trusted events. The `/agent/drag-trusted` endpoint
+   dispatches a human-like drag (cubic bezier + jitter + smoothstep
+   easing + random pauses) with `isTrusted=true`, exactly like
+   Puppeteer/Playwright. Confirmed working: baxia's slider `bg`
+   progress bar grows from 0 to 21px on mousedown, proving the event
+   is accepted.
 
-`webview_go` does not expose either. Adding CDP support would require
-either:
-- Patching webview_go to expose the underlying WebView2 controller
-  (significant C++ work), or
-- Running samweb under a CDP-enabled Chromium instead of WebView2
+2. **Behavioral analysis** — baxia analyzes the drag trajectory for
+   machine-like patterns. Our trajectory (cubic bezier + jitter +
+   smoothstep easing + random pauses) is indistinguishable from a
+   human's by statistical analysis, but baxia may use additional
+   signals (event timing micro-patterns, pointerId consistency,
+   setPointerCapture state). This is the current frontier.
 
-This is on the roadmap. Until then, the practical workflow is:
-**first login = one manual slider drag; all subsequent logins = fully
-automatic via cookie persistence.** For most use cases (CI jobs,
-automation scripts, daily-use browsers) this is sufficient — you log
-in once and never again.
+3. **Touch vs mouse** — baxia may listen for touch events rather than
+   mouse events. We enable `Input.setEmulateTouchFromMouseEvent`
+   during the drag so Chromium synthesizes touch events from our
+   mouse events.
+
+The CDP integration is the engine-level escape hatch that was
+previously documented as "not possible without patching webview_go".
+It turns out WebView2 supports the Chromium `--remote-debugging-port`
+flag via the `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment
+variable, which samweb sets automatically (default port 9222, change
+with `--cdp-port`). The CDP client (`internal/cdp`) is a minimal
+gorilla/websocket-based implementation — no external dependencies
+beyond that.
+
+**Current status**: the trusted-event injection mechanism works (baxia
+accepts the mousedown). Full slider bypass is still in progress —
+baxia's behavioral analysis rejects the drag after the initial
+mousedown. The cookie-persistence workflow (log in once manually,
+then never again) remains the reliable path.
 
 ---
 
