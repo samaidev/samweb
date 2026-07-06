@@ -246,11 +246,6 @@ func (m *MockBackend) DragTrusted(ctx context.Context, opts TrustedDragOpts) err
         return fmt.Errorf("DragTrusted not supported on mock backend (requires CDP connection)")
 }
 
-// SolveAliyunCaptcha is not supported on the mock backend (no captcha provider).
-func (m *MockBackend) SolveAliyunCaptcha(ctx context.Context, websiteURL, websiteKey string) (string, error) {
-        return "", fmt.Errorf("SolveAliyunCaptcha not supported on mock backend (requires captcha provider config)")
-}
-
 func (m *MockBackend) Eval(ctx context.Context, script string) (json.RawMessage, error) {
         m.mu.Lock()
         defer m.mu.Unlock()

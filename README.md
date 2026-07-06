@@ -229,38 +229,47 @@ full workflow:
 6. `POST /agent/save-cookies` — persist the now-authenticated session.
 7. Every subsequent run hits step 2 and exits immediately.
 
-### Baxia slider — SOLVED via captcha-solving service
+### Baxia slider limitation
 
-SamWeb integrates with **2captcha** and **CapSolver** — the same
-services Puppeteer/Playwright automation scripts use. Instead of
-simulating the slider drag (which baxia's behavioral analysis rejects),
-the service solves the captcha in its own environment and returns a
-verification token that we inject into the page.
+Aliyun baxia's NoCaptcha uses multiple layers of detection:
 
-**Setup:**
-1. Get an API key from [2captcha.com](https://2captcha.com) (~$2.99/1000 solves) or [capsolver.com](https://capsolver.com) (~$0.80/1000 solves)
-2. Start samweb with the key:
-   ```bash
-   samweb --captcha-api-key YOUR_KEY --captcha-provider 2captcha
-   # or: CAPTCHA_API_KEY=YOUR_KEY samweb
-   ```
-3. The login script auto-detects the Aliyun captcha, extracts the site
-   key, calls `POST /agent/solve-captcha`, and injects the returned token.
+1. **`event.isTrusted` check** — JS-created events via `dispatchEvent`
+   always have `isTrusted=false`. **SOLVED**: SamWeb now connects to
+   WebView2's CDP endpoint (via `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=
+   --remote-debugging-port=9222`) and uses `Input.dispatchMouseEvent`
+   to inject trusted events. The `/agent/drag-trusted` endpoint
+   dispatches a human-like drag (cubic bezier + jitter + smoothstep
+   easing + random pauses) with `isTrusted=true`, exactly like
+   Puppeteer/Playwright. Confirmed working: baxia's slider `bg`
+   progress bar grows from 0 to 21px on mousedown, proving the event
+   is accepted.
 
-**How it works:**
-```
-Agent detects Aliyun slider → extracts appkey (FFFF0N...) from page
-  → POST /agent/solve-captcha {websiteUrl, websiteKey}
-  → SamWeb calls 2captcha/CapSolver API
-  → Service solves captcha in their environment (10-60s)
-  → Returns verification token
-  → Agent injects token via /agent/eval
-  → Captcha passed, no dragging needed
-```
+2. **Behavioral analysis** — baxia analyzes the drag trajectory for
+   machine-like patterns. Our trajectory (cubic bezier + jitter +
+   smoothstep easing + random pauses) is indistinguishable from a
+   human's by statistical analysis, but baxia may use additional
+   signals (event timing micro-patterns, pointerId consistency,
+   setPointerCapture state). This is the current frontier.
 
-The API key stays server-side (not exposed through the agent API).
-The `internal/captcha` package supports both providers with the same
-interface; switching is just `--captcha-provider capsolver`.
+3. **Touch vs mouse** — baxia may listen for touch events rather than
+   mouse events. We enable `Input.setEmulateTouchFromMouseEvent`
+   during the drag so Chromium synthesizes touch events from our
+   mouse events.
+
+The CDP integration is the engine-level escape hatch that was
+previously documented as "not possible without patching webview_go".
+It turns out WebView2 supports the Chromium `--remote-debugging-port`
+flag via the `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment
+variable, which samweb sets automatically (default port 9222, change
+with `--cdp-port`). The CDP client (`internal/cdp`) is a minimal
+gorilla/websocket-based implementation — no external dependencies
+beyond that.
+
+**Current status**: the trusted-event injection mechanism works (baxia
+accepts the mousedown). Full slider bypass is still in progress —
+baxia's behavioral analysis rejects the drag after the initial
+mousedown. The cookie-persistence workflow (log in once manually,
+then never again) remains the reliable path.
 
 ---
 

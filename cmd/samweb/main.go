@@ -25,38 +25,24 @@ import (
 
 func main() {
         var (
-                title           = flag.String("title", "SamWeb", "OS window title")
-                width           = flag.Int("width", 1280, "window width in pixels")
-                height          = flag.Int("height", 800, "window height in pixels")
-                engineName      = flag.String("engine", "Google", "default search engine (Google, Bing, DuckDuckGo, Baidu)")
-                agentAddr       = flag.String("agent-addr", "127.0.0.1:7777", "address for the agent HTTP API (empty disables)")
-                agentToken      = flag.String("agent-token", "", "bearer token for the agent API (empty = no auth)")
-                cdpPort         = flag.Int("cdp-port", 9222, "CDP remote debugging port for trusted input injection (0 disables; needed for /agent/drag-trusted to bypass Aliyun baxia)")
-                captchaAPIKey   = flag.String("captcha-api-key", "", "API key for captcha-solving service (2captcha or capsolver). Enables /agent/solve-captcha. Can also set CAPTCHA_API_KEY env var.")
-                captchaProvider = flag.String("captcha-provider", "2captcha", "captcha-solving service: '2captcha' or 'capsolver'")
+                title      = flag.String("title", "SamWeb", "OS window title")
+                width      = flag.Int("width", 1280, "window width in pixels")
+                height     = flag.Int("height", 800, "window height in pixels")
+                engineName = flag.String("engine", "Google", "default search engine (Google, Bing, DuckDuckGo, Baidu)")
+                agentAddr  = flag.String("agent-addr", "127.0.0.1:7777", "address for the agent HTTP API (empty disables)")
+                agentToken = flag.String("agent-token", "", "bearer token for the agent API (empty = no auth)")
+                cdpPort    = flag.Int("cdp-port", 9222, "CDP remote debugging port for trusted input injection (0 disables; needed for /agent/drag-trusted to bypass Aliyun baxia)")
         )
         flag.Parse()
 
-        // Read captcha API key from env var if flag not set.
-        apiKey := *captchaAPIKey
-        if apiKey == "" {
-                apiKey = os.Getenv("CAPTCHA_API_KEY")
-        }
-        provider := *captchaProvider
-        if p := os.Getenv("CAPTCHA_PROVIDER"); p != "" {
-                provider = p
-        }
-
         if err := browser.Run(browser.Options{
-                Title:           *title,
-                Width:           *width,
-                Height:          *height,
-                EngineName:      *engineName,
-                AgentAddr:       *agentAddr,
-                AgentToken:      *agentToken,
-                CDPPort:         *cdpPort,
-                CaptchaAPIKey:   apiKey,
-                CaptchaProvider: provider,
+                Title:      *title,
+                Width:      *width,
+                Height:     *height,
+                EngineName: *engineName,
+                AgentAddr:  *agentAddr,
+                AgentToken: *agentToken,
+                CDPPort:    *cdpPort,
         }); err != nil {
                 fmt.Fprintf(os.Stderr, "samweb: %v\n", err)
                 os.Exit(1)
