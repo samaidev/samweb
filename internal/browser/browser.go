@@ -22,6 +22,7 @@ import (
         "log"
         "net"
         "net/http"
+        "runtime"
         "sync"
         "time"
 
@@ -51,6 +52,20 @@ type Options struct {
 // Run starts the embedded HTTP servers and opens the webview window. It
 // blocks until the window is closed by the user.
 func Run(opts Options) error {
+        // Lock this goroutine to its OS thread for the entire lifetime of the
+        // webview. On Windows, webview_go (via WebView2) creates a HWND and a
+        // message pump that MUST run on the same OS thread that called
+        // webview.New. Go's goroutine scheduler is free to move a goroutine
+        // between OS threads at any preemption point; without LockOSThread,
+        // webview.New may create the window on thread A while webview.Run
+        // pumps messages on thread B, leaving the window invisible (no
+        // MainWindowHandle, no painted content, agent API state endpoint
+        // times out forever). LockOSThread pins us to a single thread so
+        // New / SetTitle / SetSize / Init / Bind / Navigate / Run all run
+        // on the same thread that owns the HWND.
+        runtime.LockOSThread()
+        defer runtime.UnlockOSThread()
+
         if opts.Title == "" {
                 opts.Title = "SamWeb"
         }
