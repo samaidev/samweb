@@ -140,6 +140,22 @@ func Run(opts Options) error {
         }()
 
         w.Navigate(uiURL)
+
+        // Diagnostic: after a short delay, Eval a JS that sets document.title.
+        // If the window title changes to "EVAL_WORKS_<port>", we know Eval
+        // works on this platform. If it stays "SamWeb", Eval is broken.
+        go func() {
+                time.Sleep(5 * time.Second)
+                log.Printf("[browser] diagnostic: Eval document.title test")
+                w.Eval(fmt.Sprintf(`document.title = 'EVAL_WORKS_%d';`, uiPort))
+                log.Printf("[browser] diagnostic: Eval sent")
+                // Also test direct __agentCallback
+                time.Sleep(2 * time.Second)
+                log.Printf("[browser] diagnostic: direct __agentCallback test")
+                w.Eval(`try { window.__agentCallback("startup-ping", "pong", ""); } catch(e) { console.log('callback err: ' + e); }`)
+                log.Printf("[browser] diagnostic: direct callback Eval sent")
+        }()
+
         w.Run()
 
         // After the window closes, shut down the servers so the process can
