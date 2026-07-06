@@ -442,7 +442,7 @@ func (b *WebviewBackend) DragTouch(ctx context.Context, opts agent.TrustedDragOp
         c := b.cdpClient
         b.cdpMu.RUnlock()
         if c == nil {
-                return fmt.Errorf("CDP client not connected — start samweb with a non-zero --cdp-port (default 9222)")
+                return fmt.Errorf("CDP client not connected")
         }
         done := make(chan error, 1)
         go func() {
@@ -455,4 +455,59 @@ func (b *WebviewBackend) DragTouch(ctx context.Context, opts agent.TrustedDragOp
         case <-ctx.Done():
                 return ctx.Err()
         }
+}
+
+// EnableNetworkCapture starts CDP Network domain capturing.
+func (b *WebviewBackend) EnableNetworkCapture(ctx context.Context) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+        return c.EnableNetwork()
+}
+
+// DisableNetworkCapture stops CDP Network domain capturing.
+func (b *WebviewBackend) DisableNetworkCapture(ctx context.Context) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil
+        }
+        c.DisableNetwork()
+        return nil
+}
+
+// GetCapturedRequests returns all captured network requests.
+func (b *WebviewBackend) GetCapturedRequests(ctx context.Context) ([]agent.CapturedRequest, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil, fmt.Errorf("CDP client not connected")
+        }
+        reqs := c.GetCapturedRequests()
+        out := make([]agent.CapturedRequest, len(reqs))
+        for i, r := range reqs {
+                out[i] = agent.CapturedRequest{
+                        URL: r.URL, Method: r.Method, PostData: r.PostData,
+                        Status: r.Status, ResponseBody: r.ResponseBody,
+                        ResourceType: r.ResourceType,
+                }
+        }
+        return out, nil
+}
+
+// ClearCapturedRequests clears the captured requests buffer.
+func (b *WebviewBackend) ClearCapturedRequests(ctx context.Context) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil
+        }
+        c.ClearCapturedRequests()
+        return nil
 }

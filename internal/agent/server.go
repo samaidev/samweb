@@ -102,6 +102,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/drag", s.handleDrag)
         mux.HandleFunc("/agent/drag-trusted", s.handleDragTrusted)
         mux.HandleFunc("/agent/drag-touch", s.handleDragTouch)
+        mux.HandleFunc("/agent/network/enable", s.handleNetworkEnable)
+        mux.HandleFunc("/agent/network/disable", s.handleNetworkDisable)
+        mux.HandleFunc("/agent/network/requests", s.handleNetworkRequests)
+        mux.HandleFunc("/agent/network/clear", s.handleNetworkClear)
 
         mux.HandleFunc("/agent/eval", s.handleEval)
         mux.HandleFunc("/agent/wait", s.handleWait)
@@ -405,6 +409,54 @@ func (s *Server) handleDragTouch(w http.ResponseWriter, r *http.Request) {
         ctx, cancel := ctxWithTimeout(r.Context(), 120*time.Second)
         defer cancel()
         if err := s.backend.DragTouch(ctx, opts); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleNetworkEnable starts CDP Network domain capturing.
+func (s *Server) handleNetworkEnable(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := s.backend.EnableNetworkCapture(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleNetworkDisable stops CDP Network domain capturing.
+func (s *Server) handleNetworkDisable(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := s.backend.DisableNetworkCapture(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleNetworkRequests returns all captured network requests.
+func (s *Server) handleNetworkRequests(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        reqs, err := s.backend.GetCapturedRequests(ctx)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, map[string]interface{}{
+                "requests": reqs,
+                "count":    len(reqs),
+        })
+}
+
+// handleNetworkClear clears the captured requests buffer.
+func (s *Server) handleNetworkClear(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := s.backend.ClearCapturedRequests(ctx); err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return
         }

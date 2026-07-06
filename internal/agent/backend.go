@@ -40,6 +40,14 @@ type Backend interface {
         // captcha systems listen for touch events only.
         DragTouch(ctx context.Context, opts TrustedDragOpts) error
 
+        // NetworkCapture controls CDP Network domain capturing.
+        // EnableNetwork starts capturing all requests; GetCapturedRequests
+        // returns them; ClearCapturedRequests resets the buffer.
+        EnableNetworkCapture(ctx context.Context) error
+        DisableNetworkCapture(ctx context.Context) error
+        GetCapturedRequests(ctx context.Context) ([]CapturedRequest, error)
+        ClearCapturedRequests(ctx context.Context) error
+
         // Inspection
         Eval(ctx context.Context, script string) (json.RawMessage, error)
         Wait(ctx context.Context, selector string, timeoutMs int) error

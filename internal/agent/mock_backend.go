@@ -251,6 +251,16 @@ func (m *MockBackend) DragTouch(ctx context.Context, opts TrustedDragOpts) error
         return fmt.Errorf("DragTouch not supported on mock backend (requires CDP connection)")
 }
 
+// Network capture methods — all no-ops on mock backend.
+func (m *MockBackend) EnableNetworkCapture(ctx context.Context) error {
+        return fmt.Errorf("not supported on mock backend")
+}
+func (m *MockBackend) DisableNetworkCapture(ctx context.Context) error { return nil }
+func (m *MockBackend) GetCapturedRequests(ctx context.Context) ([]CapturedRequest, error) {
+        return nil, nil
+}
+func (m *MockBackend) ClearCapturedRequests(ctx context.Context) error { return nil }
+
 func (m *MockBackend) Eval(ctx context.Context, script string) (json.RawMessage, error) {
         m.mu.Lock()
         defer m.mu.Unlock()

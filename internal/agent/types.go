@@ -168,3 +168,13 @@ type ElementsResult struct {
         Elements []Element `json:"elements"`
         Count    int       `json:"count"`
 }
+
+// CapturedRequest is a network request captured via CDP Network domain.
+type CapturedRequest struct {
+        URL          string `json:"url"`
+        Method       string `json:"method"`
+        PostData     string `json:"postData,omitempty"`
+        Status       int    `json:"status"`
+        ResponseBody string `json:"responseBody,omitempty"`
+        ResourceType string `json:"resourceType,omitempty"`
+}

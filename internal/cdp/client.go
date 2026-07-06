@@ -30,6 +30,11 @@ type Client struct {
         nextID   atomic.Int64
         pending  map[int64]chan cdpResponse
         endpoint string // ws://127.0.0.1:9222/devtools/page/<id>
+
+        // Network capture state
+        captureMu        sync.RWMutex
+        capturing        bool
+        capturedRequests []CapturedRequest
 }
 
 type cdpResponse struct {
@@ -200,7 +205,98 @@ func (c *Client) Screenshot(fullPage bool) ([]byte, error) {
         return decoded, nil
 }
 
-// readLoop reads CDP responses and matches them to pending requests by ID.
+// EnableNetwork enables the CDP Network domain and captures all network
+// requests. After calling this, GetCapturedRequests returns a list of
+// all requests made by the page (including XHR, fetch, and resource
+// loads). This is used to capture baxia's verification API calls.
+func (c *Client) EnableNetwork() error {
+        // Start capturing before enabling
+        c.captureMu.Lock()
+        c.capturing = true
+        c.capturedRequests = nil
+        c.captureMu.Unlock()
+        // Enable Network domain with response bodies
+        _, err := c.send("Network.enable", map[string]interface{}{
+                "maxTotalBufferSize":    10 * 1024 * 1024,
+                "maxResourceBufferSize": 5 * 1024 * 1024,
+        })
+        return err
+}
+
+// DisableNetwork stops capturing network requests.
+func (c *Client) DisableNetwork() {
+        c.captureMu.Lock()
+        c.capturing = false
+        c.captureMu.Unlock()
+        _, _ = c.send("Network.disable", nil)
+}
+
+// GetCapturedRequests returns all network requests captured since
+// EnableNetwork was called. Each request includes the URL, method,
+// postData, and response body (if available).
+func (c *Client) GetCapturedRequests() []CapturedRequest {
+        c.captureMu.RLock()
+        defer c.captureMu.RUnlock()
+        out := make([]CapturedRequest, len(c.capturedRequests))
+        copy(out, c.capturedRequests)
+        return out
+}
+
+// CapturedRequest is a network request captured by EnableNetwork.
+type CapturedRequest struct {
+        URL       string `json:"url"`
+        Method    string `json:"method"`
+        PostData  string `json:"postData,omitempty"`
+        Status    int    `json:"status"`
+        ResponseBody string `json:"responseBody,omitempty"`
+        ResourceType string `json:"resourceType,omitempty"`
+}
+
+// ClearCapturedRequests clears the captured requests buffer.
+func (c *Client) ClearCapturedRequests() {
+        c.captureMu.Lock()
+        c.capturedRequests = nil
+        c.captureMu.Unlock()
+}
+
+// handleEvent processes CDP events (Network.requestWillBeSent, etc.)
+// to capture network traffic.
+func (c *Client) handleEvent(method string, params json.RawMessage) {
+        c.captureMu.RLock()
+        capturing := c.capturing
+        c.captureMu.RUnlock()
+        if !capturing {
+                return
+        }
+
+        switch method {
+        case "Network.requestWillBeSent":
+                var ev struct {
+                        Request struct {
+                                URL    string `json:"url"`
+                                Method string `json:"method"`
+                                PostData string `json:"postData"`
+                        } `json:"request"`
+                        Type string `json:"type"`
+                        RequestID string `json:"requestId"`
+                }
+                if err := json.Unmarshal(params, &ev); err != nil {
+                        return
+                }
+                c.captureMu.Lock()
+                c.capturedRequests = append(c.capturedRequests, CapturedRequest{
+                        URL: ev.Request.URL,
+                        Method: ev.Request.Method,
+                        PostData: ev.Request.PostData,
+                        ResourceType: ev.Type,
+                })
+                // Store request ID for later matching with response
+                if len(c.capturedRequests) > 0 {
+                        c.capturedRequests[len(c.capturedRequests)-1].Status = 0
+                }
+                c.captureMu.Unlock()
+        }
+}
 func (c *Client) readLoop() {
         for {
                 c.mu.Lock()
@@ -234,8 +330,10 @@ func (c *Client) readLoop() {
                         continue
                 }
                 if msg.ID == 0 {
-                        // Event (not a response). We don't subscribe to anything
-                        // for now, so drop.
+                        // Event (not a response). Handle Network events if capturing.
+                        if msg.Method != "" {
+                                c.handleEvent(msg.Method, msg.Params)
+                        }
                         continue
                 }
                 c.mu.Lock()
