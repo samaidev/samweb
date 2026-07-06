@@ -125,6 +125,19 @@ func (c *Client) Drag(x1, y1, x2, y2 float64, durationMs, steps, jitter, holdAtE
                 return x, y
         }
 
+        // Enable touch event emulation. Many captcha sliders (including
+        // Aliyun baxia's) listen for touchstart/touchmove/touchend rather
+        // than mouse events. Input.emulateTouchFromMouseEvent makes
+        // Chromium synthesize touch events from our mouse events, so the
+        // page sees touchstart/touchmove/touchend with isTrusted=true.
+        // We enable it for the duration of the drag and disable it after.
+        if _, err := c.send("Input.setEmulateTouchFromMouseEvent", map[string]interface{}{
+                "enabled": true,
+        }); err != nil {
+                // Not fatal — some CDP versions don't support this; fall back
+                // to plain mouse events.
+        }
+
         // mousedown (trusted, synchronous so we know it was received)
         if err := c.MouseDown(x1, y1); err != nil {
                 return err
@@ -171,6 +184,13 @@ func (c *Client) Drag(x1, y1, x2, y2 float64, durationMs, steps, jitter, holdAtE
         // mouseup (sync)
         if err := c.MouseUp(x2, y2); err != nil {
                 return err
+        }
+
+        // Disable touch emulation now that the drag is done.
+        if _, err := c.send("Input.setEmulateTouchFromMouseEvent", map[string]interface{}{
+                "enabled": false,
+        }); err != nil {
+                // non-fatal
         }
         return nil
 }
