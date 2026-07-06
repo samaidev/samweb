@@ -229,47 +229,44 @@ full workflow:
 6. `POST /agent/save-cookies` — persist the now-authenticated session.
 7. Every subsequent run hits step 2 and exits immediately.
 
-### Baxia slider limitation
+### Baxia slider — SOLVED!
 
-Aliyun baxia's NoCaptcha uses multiple layers of detection:
+Aliyun baxia NoCaptcha slider has been bypassed using a novel
+**CDP + JS Teleport** technique:
 
-1. **`event.isTrusted` check** — JS-created events via `dispatchEvent`
-   always have `isTrusted=false`. **SOLVED**: SamWeb now connects to
-   WebView2's CDP endpoint (via `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=
-   --remote-debugging-port=9222`) and uses `Input.dispatchMouseEvent`
-   to inject trusted events. The `/agent/drag-trusted` endpoint
-   dispatches a human-like drag (cubic bezier + jitter + smoothstep
-   easing + random pauses) with `isTrusted=true`, exactly like
-   Puppeteer/Playwright. Confirmed working: baxia's slider `bg`
-   progress bar grows from 0 to 21px on mousedown, proving the event
-   is accepted.
+1. **CDP mousedown** (`Input.dispatchMouseEvent`, isTrusted=true) —
+   establishes a real mouse-down state on the slider handle
+2. **CDP mousemove × 25 steps** (isTrusted=true) — drags handle to
+   ~50% of track (baxia limits CDP events to ~50%)
+3. **JS Teleport** — directly sets `handle.style.left` and
+   `bg.style.width` to the end position, jumping handle from 50% to 100%.
+   Key insight: baxia tracks handle position via `handle.style.left`
+   (inline style), and `bg.style.width = handle.style.left + 21`
+   (handle is 42px wide, half = 21).
+4. **CDP mouseup** (isTrusted=true) — triggers baxia's verification
 
-2. **Behavioral analysis** — baxia analyzes the drag trajectory for
-   machine-like patterns. Our trajectory (cubic bezier + jitter +
-   smoothstep easing + random pauses) is indistinguishable from a
-   human's by statistical analysis, but baxia may use additional
-   signals (event timing micro-patterns, pointerId consistency,
-   setPointerCapture state). This is the current frontier.
+**Verified on modelscope.cn**: SMS login flow completed end-to-end:
+- Switch to SMS tab → select +86 → fill phone → check agreement
+- Click 获取验证码 → baxia slider appears
+- CDP mousedown + CDP mousemove 25 steps + JS teleport + CDP mouseup
+- Slider passed → SMS code sent to phone
+- Fill SMS code → click login → **logged in as ctz168!**
+- 29 cookies persisted to `~/.samweb/cdp-cookies.json`
 
-3. **Touch vs mouse** — baxia may listen for touch events rather than
-   mouse events. We enable `Input.setEmulateTouchFromMouseEvent`
-   during the drag so Chromium synthesizes touch events from our
-   mouse events.
+The CDP integration uses WebView2's `--remote-debugging-port` (via
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` env var, auto-set by samweb
+with `--cdp-port 9222`). The CDP client (`internal/cdp`) is a minimal
+gorilla/websocket-based implementation.
 
-The CDP integration is the engine-level escape hatch that was
-previously documented as "not possible without patching webview_go".
-It turns out WebView2 supports the Chromium `--remote-debugging-port`
-flag via the `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment
-variable, which samweb sets automatically (default port 9222, change
-with `--cdp-port`). The CDP client (`internal/cdp`) is a minimal
-gorilla/websocket-based implementation — no external dependencies
-beyond that.
-
-**Current status**: the trusted-event injection mechanism works (baxia
-accepts the mousedown). Full slider bypass is still in progress —
-baxia's behavioral analysis rejects the drag after the initial
-mousedown. The cookie-persistence workflow (log in once manually,
-then never again) remains the reliable path.
+New agent API endpoints for slider bypass:
+- `POST /agent/cdp-mouse` — single CDP `Input.dispatchMouseEvent`
+  (type, x, y, button, buttons, clickCount, timestamp)
+- `POST /agent/drag-trusted` — full CDP drag (mousedown+move+mouseup)
+- `POST /agent/drag-touch` — CDP touch events (touchStart+move+End)
+- `POST /agent/screenshot-trusted` — CDP `Page.captureScreenshot`
+- `POST /agent/network/*` — CDP Network domain capture
+- `POST /agent/save-cookies` / `POST /agent/load-cookies` —
+  persist WebView2 cookies via CDP `Network.getAllCookies/setCookie`
 
 ---
 
