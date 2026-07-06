@@ -1,0 +1,17 @@
+# Temporary verification files (generated during VLM annotation)
+_coarse_*.png
+_fine_*.png
+_verify_*.png
+
+# Generated standalone HTML (regenerate with build_standalone_html.py)
+annotate_standalone.html
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Annotations exported by the user (merge them with merge_annotations.py)
+annotations.json
+
+# Log files
+*.log
