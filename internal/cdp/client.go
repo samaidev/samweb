@@ -97,7 +97,67 @@ func ConnectToPage(port int) (*Client, error) {
         return Connect(t.WebSocketDebuggerURL)
 }
 
-// Screenshot takes a PNG screenshot via CDP Page.captureScreenshot.
+// GetAllCookies returns all cookies from the browser's cookie store via
+// CDP Network.getAllCookies. This includes cookies set by navigate-direct
+// (which bypass samweb's proxy cookie jar, since the webview loads the
+// page directly via WebView2's network stack). Use this to export the
+// full cookie state for persistence.
+func (c *Client) GetAllCookies() ([]CDPCookie, error) {
+        resp, err := c.send("Network.getAllCookies", nil)
+        if err != nil {
+                return nil, err
+        }
+        var result struct {
+                Cookies []CDPCookie `json:"cookies"`
+        }
+        if err := json.Unmarshal(resp, &result); err != nil {
+                return nil, fmt.Errorf("cdp: decode cookies response: %w", err)
+        }
+        return result.Cookies, nil
+}
+
+// CDPCookie is the CDP representation of a browser cookie (from
+// Network.getAllCookies). Field names match the CDP spec.
+type CDPCookie struct {
+        Name     string  `json:"name"`
+        Value    string  `json:"value"`
+        Domain   string  `json:"domain"`
+        Path     string  `json:"path"`
+        Expires  float64 `json:"expires"`   // Unix timestamp in seconds (-1 = session)
+        Size     int     `json:"size"`
+        HTTPOnly bool    `json:"httpOnly"`
+        Secure   bool    `json:"secure"`
+        Session  bool    `json:"session"`
+        SameSite string  `json:"sameSite"`
+        Priority string  `json:"priority"`
+}
+
+// SetCookie injects a cookie into the browser's cookie store via CDP
+// Network.setCookie. Used by LoadCookiesTrusted to restore a previously
+// saved cookie jar.
+func (c *Client) SetCookie(cookie CDPCookie) error {
+        params := map[string]interface{}{
+                "name":     cookie.Name,
+                "value":    cookie.Value,
+                "domain":   cookie.Domain,
+                "path":     cookie.Path,
+                "httpOnly": cookie.HTTPOnly,
+                "secure":   cookie.Secure,
+                "sameSite": cookie.SameSite,
+        }
+        if cookie.Expires > 0 && !cookie.Session {
+                params["expires"] = cookie.Expires
+        }
+        _, err := c.send("Network.setCookie", params)
+        return err
+}
+
+// ClearCookies deletes all cookies from the browser's cookie store via
+// CDP Network.clearBrowserCookies. Used by ResetCookiesTrusted.
+func (c *Client) ClearCookies() error {
+        _, err := c.send("Network.clearBrowserCookies", nil)
+        return err
+}
 // Returns the base64-encoded PNG data (CDP returns base64, not raw
 // bytes). The caller should base64-decode it.
 //

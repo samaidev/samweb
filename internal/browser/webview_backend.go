@@ -5,6 +5,8 @@ import (
         "encoding/json"
         "errors"
         "fmt"
+        "os"
+        "path/filepath"
         "sync"
         "time"
 
@@ -13,6 +15,52 @@ import (
         "github.com/samaidev/samweb/internal/proxy"
         "github.com/webview/webview_go"
 )
+
+// cdpCookieFile is the on-disk JSON file for CDP browser cookies.
+// Defaults to ~/.samweb/cdp-cookies.json (alongside the proxy cookie jar).
+func cdpCookieFile() string {
+        home, err := os.UserHomeDir()
+        if err != nil || home == "" {
+                home = "."
+        }
+        return filepath.Join(home, ".samweb", "cdp-cookies.json")
+}
+
+// saveCDPCookies writes CDP browser cookies to disk (atomic temp+rename).
+func saveCDPCookies(cookies []cdp.CDPCookie) error {
+        if len(cookies) == 0 {
+                return nil
+        }
+        path := cdpCookieFile()
+        if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+                return err
+        }
+        data, err := json.MarshalIndent(cookies, "", "  ")
+        if err != nil {
+                return err
+        }
+        tmp := path + ".tmp"
+        if err := os.WriteFile(tmp, data, 0o600); err != nil {
+                return err
+        }
+        return os.Rename(tmp, path)
+}
+
+// loadCDPCookies reads CDP browser cookies from disk.
+func loadCDPCookies() ([]cdp.CDPCookie, error) {
+        data, err := os.ReadFile(cdpCookieFile())
+        if err != nil {
+                if os.IsNotExist(err) {
+                        return nil, nil
+                }
+                return nil, err
+        }
+        var cookies []cdp.CDPCookie
+        if err := json.Unmarshal(data, &cookies); err != nil {
+                return nil, err
+        }
+        return cookies, nil
+}
 
 // WebviewBackend is the production agent.Backend implementation that drives
 // a real webview instance. Every method:
@@ -277,33 +325,88 @@ func (b *WebviewBackend) ScreenshotTrusted(ctx context.Context, fullPage bool) (
 
 func (b *WebviewBackend) Close() error { return nil }
 
-// ResetCookies clears the proxy's shared cookie jar so the next navigation
-// starts a fresh session. This is useful for switching accounts or retrying
-// a failed login without restarting the whole browser.
+// ResetCookies clears both the proxy's cookie jar AND the CDP browser
+// cookie store (where navigate-direct cookies live). Call before a
+// fresh login attempt.
 func (b *WebviewBackend) ResetCookies(ctx context.Context) error {
         proxy.ResetCookies()
+        // Also clear the CDP browser cookie store (WebView2's own cookies
+        // from navigate-direct navigations).
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c != nil {
+                if err := c.ClearCookies(); err != nil {
+                        // non-fatal — log and continue
+                        _ = err
+                }
+        }
         return nil
 }
 
-// SaveCookies persists the proxy's cookie jar to disk so the session
-// survives process restarts. This is the mechanism that makes SamWeb
-// "log in once, stay logged in forever" — after a successful manual
-// login, the agent calls SaveCookies, and on the next process start
-// the proxy's init() calls LoadCookies automatically.
+// SaveCookies persists BOTH the proxy cookie jar AND the CDP browser
+// cookie store to disk. The CDP cookies are saved to a separate file
+// (~/.samweb/cdp-cookies.json) and restored on next process start via
+// LoadCookies. This is what makes navigate-direct logins persist —
+// the proxy jar only captures cookies from /proxy?url= requests, but
+// navigate-direct loads pages via WebView2's own network stack, so
+// cookies end up in WebView2's cookie store, not the proxy jar.
 func (b *WebviewBackend) SaveCookies(ctx context.Context) error {
-        return proxy.SaveCookies()
+        // 1. Save proxy jar (for /proxy?url= cookies)
+        if err := proxy.SaveCookies(); err != nil {
+                return err
+        }
+        // 2. Save CDP cookies (for navigate-direct cookies)
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil // no CDP — proxy-only mode
+        }
+        cookies, err := c.GetAllCookies()
+        if err != nil {
+                return fmt.Errorf("get CDP cookies: %w", err)
+        }
+        if err := saveCDPCookies(cookies); err != nil {
+                return fmt.Errorf("save CDP cookies: %w", err)
+        }
+        return nil
 }
 
-// LoadCookies re-reads the cookie jar from disk, replacing any in-memory
-// cookies. Useful when the cookie file was edited externally or written
-// by a previous process.
+// LoadCookies re-reads both cookie stores from disk: the proxy jar
+// (proxy.LoadCookies) and the CDP browser cookie store (via
+// Network.setCookie for each saved cookie).
 func (b *WebviewBackend) LoadCookies(ctx context.Context) error {
-        return proxy.LoadCookies()
+        // 1. Load proxy jar
+        if err := proxy.LoadCookies(); err != nil {
+                return err
+        }
+        // 2. Load CDP cookies into the browser store
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil
+        }
+        cookies, err := loadCDPCookies()
+        if err != nil {
+                return err
+        }
+        for _, ck := range cookies {
+                if err := c.SetCookie(ck); err != nil {
+                        // non-fatal — one bad cookie shouldn't fail the whole load
+                        _ = err
+                }
+        }
+        return nil
 }
 
 // SetCDPClient stores the CDP client (connected to WebView2's remote
 // debugging port). Called by browser.Run after the webview starts.
-// Once set, DragTrusted uses it to inject trusted mouse events.
+// Once set, DragTrusted uses it to inject trusted mouse events, and
+// SaveCookies/LoadCookies/ResetCookies also operate on the CDP cookie
+// store (which is where navigate-direct cookies live, since they bypass
+// samweb's proxy).
 func (b *WebviewBackend) SetCDPClient(c *cdp.Client) {
         b.cdpMu.Lock()
         defer b.cdpMu.Unlock()
