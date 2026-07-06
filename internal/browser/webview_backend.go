@@ -290,7 +290,7 @@ func (b *WebviewBackend) SetCDPClient(c *cdp.Client) {
 // caller must add the iframe's offset to the iframe-local coordinates
 // (use the agent's elements endpoint to get the iframe's
 // getBoundingClientRect).
-func (b *WebviewBackend) DragTrusted(ctx context.Context, x1, y1, x2, y2 float64, durationMs, steps, jitter, holdAtEndMs int) error {
+func (b *WebviewBackend) DragTrusted(ctx context.Context, opts agent.TrustedDragOpts) error {
         b.cdpMu.RLock()
         c := b.cdpClient
         b.cdpMu.RUnlock()
@@ -300,7 +300,8 @@ func (b *WebviewBackend) DragTrusted(ctx context.Context, x1, y1, x2, y2 float64
         // Run the drag in a goroutine so we can respect ctx cancellation.
         done := make(chan error, 1)
         go func() {
-                done <- c.Drag(x1, y1, x2, y2, durationMs, steps, jitter, holdAtEndMs)
+                done <- c.Drag(opts.X1, opts.Y1, opts.X2, opts.Y2,
+                        opts.Duration, opts.Steps, opts.Jitter, opts.HoldAtEnd)
         }()
         select {
         case err := <-done:
