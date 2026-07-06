@@ -204,19 +204,24 @@ def main():
     else:
         print("\n[5] No password provided — you must type it in the webview window")
 
-    # 7. Try to auto-detect and drag the Aliyun NoCaptcha slider.
-    #    The slider appears as #nc_1_n1z (the drag handle) inside an
-    #    element with class .nc-container. We drag from the handle to
-    #    the right edge of the slider track.
-    print(f"\n[7] Attempting to auto-drag the Aliyun NoCaptcha slider...")
+    # 7. Click the login button FIRST — on modelscope's passport page,
+    #    the Aliyun NoCaptcha slider is hidden by default and only
+    #    appears after the user clicks "登录". Once visible, we auto-drag.
+    print(f"\n[7] Clicking login button to trigger slider...")
+    try:
+        req(base, args.token, "POST", "/agent/click",
+            body={"selector": ".fm-button.fm-submit"}, timeout=10)
+        print("    clicked login button")
+    except Exception as e:
+        print(f"    click failed: {e}")
+    # Wait for slider to render
+    time.sleep(3)
+
+    # 8. Now try to auto-detect and drag the slider.
+    print(f"\n[8] Attempting to auto-drag the Aliyun NoCaptcha slider...")
     slider_dragged = False
     for attempt in range(5):
         try:
-            # Look for the slider handle. Aliyun baxia uses several
-            # possible IDs depending on version. We also require the
-            # element to be visible (non-zero size) — otherwise
-            # getBoundingClientRect returns 0,0,0,0 and the drag would
-            # be meaningless.
             script = (
                 "(function() {"
                 "  var candidates = ['#nc_1_n1z', '.nc-lang-cnt .btn_slide', "
@@ -250,7 +255,6 @@ def main():
                 "})()"
             )
             s, body = _eval(base, args.token, script)
-            # Unwrap nested JSON string quotes
             if body and body != "null" and body != '"null"':
                 import json as _json
                 while body.startswith('"') and body.endswith('"') and len(body) > 2:
@@ -259,7 +263,6 @@ def main():
                 hx, hy = pos["handle"]["x"], pos["handle"]["y"]
                 tx = pos["track"]["x"] + pos["track"]["w"] - 10
                 ty = hy
-                # Skip if coordinates look invalid (all zero)
                 if hx == 0 and hy == 0 and tx <= 0:
                     print(f"    attempt {attempt+1}: slider coords invalid (still rendering?)")
                     time.sleep(2)
@@ -283,7 +286,6 @@ def main():
                 if "passed" in str(body2):
                     print("    slider PASSED!")
                     break
-                # Wait before retry (slider may reset)
                 time.sleep(2)
             else:
                 print(f"    attempt {attempt+1}: slider not visible yet, waiting...")
@@ -292,20 +294,21 @@ def main():
             print(f"    attempt {attempt+1} failed: {e}")
             time.sleep(2)
 
+    if not slider_dragged:
+        print("\n[!] Could not auto-drag slider. You may need to complete it manually in the webview window.")
+
+    # After slider passes, click login again to actually submit
     if slider_dragged:
-        # Try to click the login button
-        print("\n[8] Clicking login button...")
+        print("\n[9] Clicking login button again to submit...")
         try:
             req(base, args.token, "POST", "/agent/click",
                 body={"selector": ".fm-button.fm-submit"}, timeout=10)
             print("    clicked login")
         except Exception as e:
             print(f"    click failed: {e}")
-    else:
-        print("\n[8] Could not auto-drag slider. You may need to complete it manually.")
 
-    # 9. Wait for login to complete (URL redirect to modelscope.cn)
-    print(f"\n[9] Waiting up to {args.login_wait}s for login to complete...")
+    # 10. Wait for login to complete (URL redirect to modelscope.cn)
+    print(f"\n[10] Waiting up to {args.login_wait}s for login to complete...")
     deadline = time.time() + args.login_wait
     last_state = ""
     while time.time() < deadline:
@@ -326,11 +329,11 @@ def main():
         print("\n>>> Timed out waiting for login. Cookies not saved.")
         return 1
 
-    # 10. Save cookies for next time
+    # 11. Save cookies for next time
     if args.no_save:
-        print("\n[10] Skipping cookie save (--no-save)")
+        print("\n[11] Skipping cookie save (--no-save)")
     else:
-        print("\n[10] Saving cookies for next launch...")
+        print("\n[11] Saving cookies for next launch...")
         try:
             req(base, args.token, "POST", "/agent/save-cookies")
             print("    cookies saved — next launch will skip login entirely")
