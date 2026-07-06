@@ -244,3 +244,19 @@ func (b *WebviewBackend) ResetCookies(ctx context.Context) error {
         proxy.ResetCookies()
         return nil
 }
+
+// SaveCookies persists the proxy's cookie jar to disk so the session
+// survives process restarts. This is the mechanism that makes SamWeb
+// "log in once, stay logged in forever" — after a successful manual
+// login, the agent calls SaveCookies, and on the next process start
+// the proxy's init() calls LoadCookies automatically.
+func (b *WebviewBackend) SaveCookies(ctx context.Context) error {
+        return proxy.SaveCookies()
+}
+
+// LoadCookies re-reads the cookie jar from disk, replacing any in-memory
+// cookies. Useful when the cookie file was edited externally or written
+// by a previous process.
+func (b *WebviewBackend) LoadCookies(ctx context.Context) error {
+        return proxy.LoadCookies()
+}

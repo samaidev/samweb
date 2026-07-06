@@ -277,6 +277,14 @@ def main():
         except RuntimeError as e:
             assert_true("405 for GET on reset-cookies", "405" in str(e), str(e))
 
+        # 17. Save / Load cookies (new endpoints). On the mock backend these
+        # are no-ops but the endpoints must still respond 200.
+        section("Save / Load cookies")
+        r = req("POST", "/agent/save-cookies")
+        assert_eq("save-cookies ok", r["ok"], True)
+        r = req("POST", "/agent/load-cookies")
+        assert_eq("load-cookies ok", r["ok"], True)
+
     finally:
         proc.send_signal(signal.SIGTERM)
         try:

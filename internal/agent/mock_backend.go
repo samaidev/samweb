@@ -164,6 +164,12 @@ func (m *MockBackend) LastClick() string {
 // without forcing every implementation to be aware of it.
 func (m *MockBackend) ResetCookies(ctx context.Context) error { return nil }
 
+// SaveCookies is a no-op on the mock backend.
+func (m *MockBackend) SaveCookies(ctx context.Context) error { return nil }
+
+// LoadCookies is a no-op on the mock backend.
+func (m *MockBackend) LoadCookies(ctx context.Context) error { return nil }
+
 func (m *MockBackend) Scroll(ctx context.Context, opts ScrollOpts) error {
         m.mu.Lock()
         defer m.mu.Unlock()

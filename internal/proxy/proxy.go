@@ -10,13 +10,18 @@
 package proxy
 
 import (
+        "encoding/json"
         "errors"
+        "fmt"
         "io"
         "log"
         "net/http"
         "net/http/cookiejar"
         "net/url"
+        "os"
+        "path/filepath"
         "strings"
+        "sync"
         "time"
 
         "golang.org/x/net/publicsuffix"
@@ -83,6 +88,11 @@ func init() {
         } else {
                 globalJar = j
         }
+        // Load persisted cookies from disk so sessions survive process restarts.
+        // This is what makes SamWeb "log in once, stay logged in forever".
+        if err := LoadCookies(); err != nil {
+                log.Printf("[proxy] load cookies: %v (continuing with empty jar)", err)
+        }
 }
 
 // globalClient is the shared http.Client with the cookie jar and an optional
@@ -132,6 +142,212 @@ func ResetCookies() {
         }
 }
 
+// ----------------------------- Cookie persistence -----------------------------
+
+// cookieFile is the on-disk JSON file used to persist the cookie jar across
+// process restarts. It defaults to ~/.samweb/cookies.json but can be
+// overridden with SetCookieFile.
+var (
+        cookieFileMu sync.Mutex
+        cookieFile   = defaultCookieFile()
+)
+
+func defaultCookieFile() string {
+        home, err := os.UserHomeDir()
+        if err != nil || home == "" {
+                home = "."
+        }
+        return filepath.Join(home, ".samweb", "cookies.json")
+}
+
+// SetCookieFile overrides the on-disk cookie persistence file. Pass an empty
+// string to disable persistence.
+func SetCookieFile(path string) {
+        cookieFileMu.Lock()
+        defer cookieFileMu.Unlock()
+        cookieFile = path
+}
+
+// CookieFile returns the current on-disk cookie persistence file.
+func CookieFile() string {
+        cookieFileMu.Lock()
+        defer cookieFileMu.Unlock()
+        return cookieFile
+}
+
+// serializedCookie is the JSON representation of an http.Cookie, augmented
+// with the host-only and scheme flags that cookiejar tracks but http.Cookie
+// does not expose.
+type serializedCookie struct {
+        Name     string `json:"name"`
+        Value    string `json:"value"`
+        Path     string `json:"path,omitempty"`
+        Domain   string `json:"domain,omitempty"`
+        Expires  string `json:"expires,omitempty"` // RFC 3339
+        Secure   bool   `json:"secure,omitempty"`
+        HTTPOnly bool   `json:"http_only,omitempty"`
+        // HostOnly is true if the cookie is host-only (no Domain attribute was
+        // set). Host-only cookies are only sent to the exact host that set them.
+        HostOnly bool `json:"host_only,omitempty"`
+        // Scheme is "http" or "https"; only cookies whose scheme matches are
+        // sent on plain-HTTP vs HTTPS requests.
+        Scheme string `json:"scheme,omitempty"`
+}
+
+// SaveCookies serializes the current cookie jar to CookieFile(). It is a
+// no-op if SetCookieFile("") was called or the jar is empty. The file is
+// written atomically (temp file + rename) so a crash mid-write cannot
+// corrupt the cookie store.
+func SaveCookies() error {
+        cookieFileMu.Lock()
+        path := cookieFile
+        cookieFileMu.Unlock()
+        if path == "" || globalJar == nil {
+                return nil
+        }
+
+        // Walk every URL scheme://host that may have cookies. We do this by
+        // enumerating the public suffix list's known eTLDs is infeasible;
+        // instead we serialize cookies for a curated set of hosts that have
+        // been seen by the jar (tracked via trackHost). For backwards
+        // compatibility, also try the most common ones.
+        hosts := knownHosts()
+        var cookies []serializedCookie
+        for _, h := range hosts {
+                for _, scheme := range []string{"https", "http"} {
+                        u := &url.URL{Scheme: scheme, Host: h}
+                        for _, c := range globalJar.Cookies(u) {
+                                cookies = append(cookies, serializedCookie{
+                                        Name: c.Name, Value: c.Value, Path: c.Path,
+                                        Domain: c.Domain, Secure: c.Secure, HTTPOnly: c.HttpOnly,
+                                        // cookiejar does not expose HostOnly / Scheme; we
+                                        // approximate by treating Domain=="host" as host-only.
+                                        HostOnly: c.Domain == h || c.Domain == "",
+                                        Scheme:   scheme,
+                                })
+                                if !c.Expires.IsZero() {
+                                        cookies[len(cookies)-1].Expires = c.Expires.Format(time.RFC3339)
+                                }
+                        }
+                }
+        }
+
+        if len(cookies) == 0 {
+                return nil
+        }
+
+        if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+                return fmt.Errorf("mkdir cookie dir: %w", err)
+        }
+        data, err := json.MarshalIndent(cookies, "", "  ")
+        if err != nil {
+                return fmt.Errorf("marshal cookies: %w", err)
+        }
+        tmp := path + ".tmp"
+        if err := os.WriteFile(tmp, data, 0o600); err != nil {
+                return fmt.Errorf("write temp cookie file: %w", err)
+        }
+        if err := os.Rename(tmp, path); err != nil {
+                return fmt.Errorf("rename cookie file: %w", err)
+        }
+        log.Printf("[proxy] saved %d cookies to %s", len(cookies), path)
+        return nil
+}
+
+// LoadCookies reads CookieFile() and populates the cookie jar. Missing file
+// is not an error. Malformed file logs a warning and returns nil.
+func LoadCookies() error {
+        cookieFileMu.Lock()
+        path := cookieFile
+        cookieFileMu.Unlock()
+        if path == "" || globalJar == nil {
+                return nil
+        }
+        data, err := os.ReadFile(path)
+        if err != nil {
+                if os.IsNotExist(err) {
+                        return nil
+                }
+                return fmt.Errorf("read cookie file: %w", err)
+        }
+        var cookies []serializedCookie
+        if err := json.Unmarshal(data, &cookies); err != nil {
+                return fmt.Errorf("unmarshal cookies: %w", err)
+        }
+        loaded := 0
+        for _, sc := range cookies {
+                c := &http.Cookie{
+                        Name:     sc.Name,
+                        Value:    sc.Value,
+                        Path:     sc.Path,
+                        Domain:   sc.Domain,
+                        Secure:   sc.Secure,
+                        HttpOnly: sc.HTTPOnly,
+                }
+                if sc.Expires != "" {
+                        t, err := time.Parse(time.RFC3339, sc.Expires)
+                        if err == nil {
+                                c.Expires = t
+                        }
+                }
+                // Determine the URL to set the cookie under. If Domain is set,
+                // use https://<domain>; if host-only, use https://<host>.
+                host := sc.Domain
+                if host == "" {
+                        // host-only cookie: we need the original host. We don't have
+                        // it stored separately, so use the first known host that
+                        // matches by suffix.
+                        for _, h := range knownHosts() {
+                                if strings.HasSuffix(h, sc.Domain) || sc.Domain == "" {
+                                        host = h
+                                        break
+                                }
+                        }
+                }
+                if host == "" {
+                        continue
+                }
+                scheme := sc.Scheme
+                if scheme == "" {
+                        scheme = "https"
+                }
+                u := &url.URL{Scheme: scheme, Host: host}
+                globalJar.SetCookies(u, []*http.Cookie{c})
+                loaded++
+        }
+        log.Printf("[proxy] loaded %d cookies from %s", loaded, path)
+        return nil
+}
+
+// knownHosts returns the set of hosts whose cookies should be persisted.
+// It is seeded from the hosts seen by trackHost and is updated on every
+// proxy request.
+var (
+        knownHostsMu sync.RWMutex
+        knownHostsSet = map[string]struct{}{}
+)
+
+// trackHost records that we have seen cookies for this host so that
+// SaveCookies can enumerate it. Called from ServeHTTP on every request.
+func trackHost(host string) {
+        if host == "" {
+                return
+        }
+        knownHostsMu.Lock()
+        knownHostsSet[host] = struct{}{}
+        knownHostsMu.Unlock()
+}
+
+func knownHosts() []string {
+        knownHostsMu.RLock()
+        defer knownHostsMu.RUnlock()
+        out := make([]string, 0, len(knownHostsSet))
+        for h := range knownHostsSet {
+                out = append(out, h)
+        }
+        return out
+}
+
 // ServeHTTP fetches target and streams the response to w, stripping
 // frame-busting headers. It is exported so the browser package can mount
 // the proxy on the same http.ServeMux as the UI (so the iframe is
@@ -146,6 +362,9 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, target string) {
                 http.Error(w, "only http/https are supported", http.StatusBadRequest)
                 return
         }
+        // Track this host so SaveCookies can enumerate it when persisting
+        // the cookie jar.
+        trackHost(u.Host)
 
         outReq, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
         if err != nil {

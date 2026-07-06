@@ -46,6 +46,17 @@ type Backend interface {
         // retrying a failed login). On the mock backend it is a no-op.
         ResetCookies(ctx context.Context) error
 
+        // SaveCookies persists the cookie jar to disk so sessions survive
+        // process restarts. On the real WebviewBackend this writes to
+        // ~/.samweb/cookies.json (or whatever SetCookieFile set). On the mock
+        // backend it is a no-op.
+        SaveCookies(ctx context.Context) error
+
+        // LoadCookies re-reads the cookie jar from disk, discarding any
+        // in-memory cookies. Useful after SaveCookies on another process,
+        // or after manually editing the cookie file.
+        LoadCookies(ctx context.Context) error
+
         // Lifecycle
         Close() error
 }

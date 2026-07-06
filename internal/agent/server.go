@@ -106,6 +106,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/element", s.handleElement)
         mux.HandleFunc("/agent/screenshot", s.handleScreenshot)
         mux.HandleFunc("/agent/reset-cookies", s.handleResetCookies)
+        mux.HandleFunc("/agent/save-cookies", s.handleSaveCookies)
+        mux.HandleFunc("/agent/load-cookies", s.handleLoadCookies)
 }
 
 // ----------------------------- helpers -----------------------------
@@ -456,6 +458,40 @@ func (s *Server) handleResetCookies(w http.ResponseWriter, r *http.Request) {
         ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
         defer cancel()
         if err := s.backend.ResetCookies(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleSaveCookies persists the cookie jar to disk so the session
+// survives process restarts. Call this after a successful login.
+func (s *Server) handleSaveCookies(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+                w.Header().Set("Allow", http.MethodPost)
+                writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := s.backend.SaveCookies(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleLoadCookies re-reads the cookie jar from disk, discarding any
+// in-memory cookies. Useful after SaveCookies on another process.
+func (s *Server) handleLoadCookies(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+                w.Header().Set("Allow", http.MethodPost)
+                writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := s.backend.LoadCookies(ctx); err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return
         }

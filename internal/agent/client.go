@@ -214,3 +214,17 @@ func (c *Client) Screenshot(ctx context.Context, fullPage bool) ([]byte, error) 
 func (c *Client) ResetCookies(ctx context.Context) error {
         return c.do(ctx, "POST", "/agent/reset-cookies", nil, nil)
 }
+
+// SaveCookies persists the cookie jar to disk so the session survives
+// process restarts. Call this after a successful login to make the
+// "log in once, stay logged in forever" workflow work.
+func (c *Client) SaveCookies(ctx context.Context) error {
+        return c.do(ctx, "POST", "/agent/save-cookies", nil, nil)
+}
+
+// LoadCookies re-reads the cookie jar from disk, replacing in-memory
+// cookies. Useful after SaveCookies on another process, or after
+// manually editing the cookie file.
+func (c *Client) LoadCookies(ctx context.Context) error {
+        return c.do(ctx, "POST", "/agent/load-cookies", nil, nil)
+}
