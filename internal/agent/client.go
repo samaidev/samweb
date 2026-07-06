@@ -154,6 +154,14 @@ func (c *Client) Drag(ctx context.Context, opts DragOpts) error {
         return c.do(ctx, "POST", "/agent/drag", opts, nil)
 }
 
+// DragTrusted dispatches a CDP-injected trusted drag (isTrusted=true).
+// Required for Aliyun baxia / Geetest sliders that reject JS-dispatched
+// events. Coordinates are in CSS pixels relative to the TOP-LEVEL page's
+// viewport (NOT iframe-local).
+func (c *Client) DragTrusted(ctx context.Context, opts TrustedDragOpts) error {
+        return c.do(ctx, "POST", "/agent/drag-trusted", opts, nil)
+}
+
 // Eval evaluates a JavaScript expression and returns the JSON-encoded result.
 func (c *Client) Eval(ctx context.Context, script string) (json.RawMessage, error) {
         var res EvalResult

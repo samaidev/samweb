@@ -29,6 +29,12 @@ type Backend interface {
         Type(ctx context.Context, opts TypeOpts) error
         PressKey(ctx context.Context, opts KeyOpts) error
         Drag(ctx context.Context, opts DragOpts) error
+        // DragTrusted is like Drag but uses CDP Input.dispatchMouseEvent
+        // to inject isTrusted=true events. Required for Aliyun baxia /
+        // Geetest sliders that reject JS-dispatched events. Returns an
+        // error if the backend has no CDP connection (e.g. the mock
+        // backend, or a real webview backend started without a CDP port).
+        DragTrusted(ctx context.Context, opts TrustedDragOpts) error
 
         // Inspection
         Eval(ctx context.Context, script string) (json.RawMessage, error)

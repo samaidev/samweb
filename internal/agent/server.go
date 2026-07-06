@@ -100,6 +100,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/type", s.handleType)
         mux.HandleFunc("/agent/key", s.handleKey)
         mux.HandleFunc("/agent/drag", s.handleDrag)
+        mux.HandleFunc("/agent/drag-trusted", s.handleDragTrusted)
 
         mux.HandleFunc("/agent/eval", s.handleEval)
         mux.HandleFunc("/agent/wait", s.handleWait)
@@ -369,6 +370,31 @@ func (s *Server) handleDrag(w http.ResponseWriter, r *http.Request) {
 
         defer cancel()
         if err := s.backend.Drag(ctx, opts); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleDragTrusted dispatches a CDP-injected trusted drag. Unlike
+// /agent/drag, the events have isTrusted=true and bypass anti-bot
+// systems like Aliyun baxia. Requires the backend to have a CDP
+// connection (only the real WebviewBackend started with --cdp-port has one).
+func (s *Server) handleDragTrusted(w http.ResponseWriter, r *http.Request) {
+        var opts TrustedDragOpts
+        if err := readJSON(r, &opts); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        // TrustedDragOpts requires explicit x1,y1,x2,y2 (no selectors, because
+        // CDP coordinates are absolute page coords and the caller is expected
+        // to have resolved selectors via /agent/elements first).
+        // We accept (0,0) as a valid coordinate.
+        // Drag can take 1-2 seconds; allow up to 30s for slow drags.
+        ctx, cancel := ctxWithTimeout(r.Context(), 30*time.Second)
+
+        defer cancel()
+        if err := s.backend.DragTrusted(ctx, opts); err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return
         }

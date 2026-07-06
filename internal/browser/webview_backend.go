@@ -9,6 +9,7 @@ import (
         "time"
 
         "github.com/samaidev/samweb/internal/agent"
+        "github.com/samaidev/samweb/internal/cdp"
         "github.com/samaidev/samweb/internal/proxy"
         "github.com/webview/webview_go"
 )
@@ -30,6 +31,12 @@ type WebviewBackend struct {
         w    webview.WebView
         mu   sync.Mutex
         pend map[string]chan callbackResult
+
+        // cdpMu protects cdpClient. The CDP client is connected lazily after
+        // the webview starts (see browser.Run); DragTrusted checks for nil
+        // and returns a clear error if CDP is not connected.
+        cdpMu     sync.RWMutex
+        cdpClient *cdp.Client
 }
 
 type callbackResult struct {
@@ -262,4 +269,43 @@ func (b *WebviewBackend) SaveCookies(ctx context.Context) error {
 // by a previous process.
 func (b *WebviewBackend) LoadCookies(ctx context.Context) error {
         return proxy.LoadCookies()
+}
+
+// SetCDPClient stores the CDP client (connected to WebView2's remote
+// debugging port). Called by browser.Run after the webview starts.
+// Once set, DragTrusted uses it to inject trusted mouse events.
+func (b *WebviewBackend) SetCDPClient(c *cdp.Client) {
+        b.cdpMu.Lock()
+        defer b.cdpMu.Unlock()
+        b.cdpClient = c
+}
+
+// DragTrusted injects a human-like drag via CDP's Input.dispatchMouseEvent.
+// Unlike the JS-level drag (which creates untrusted events that baxia
+// rejects), CDP events have isTrusted=true and are accepted by anti-bot
+// systems as if a real user moved the mouse.
+//
+// The coordinates are in CSS pixels relative to the page's viewport
+// (top-level page, not iframe-local). For iframe-targeted drags, the
+// caller must add the iframe's offset to the iframe-local coordinates
+// (use the agent's elements endpoint to get the iframe's
+// getBoundingClientRect).
+func (b *WebviewBackend) DragTrusted(ctx context.Context, x1, y1, x2, y2 float64, durationMs, steps, jitter, holdAtEndMs int) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected — start samweb with a non-zero --cdp-port (default 9222)")
+        }
+        // Run the drag in a goroutine so we can respect ctx cancellation.
+        done := make(chan error, 1)
+        go func() {
+                done <- c.Drag(x1, y1, x2, y2, durationMs, steps, jitter, holdAtEndMs)
+        }()
+        select {
+        case err := <-done:
+                return err
+        case <-ctx.Done():
+                return ctx.Err()
+        }
 }

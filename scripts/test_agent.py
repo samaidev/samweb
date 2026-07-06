@@ -238,6 +238,20 @@ def main():
         except RuntimeError as e:
             assert_true("400 for empty drag", "400" in str(e), str(e))
 
+        # 11c. Drag-trusted (CDP) — on the mock backend this returns 500
+        # because there's no CDP connection. Verify the endpoint exists
+        # and gives a clear error.
+        section("Drag-trusted (CDP)")
+        try:
+            r = req("POST", "/agent/drag-trusted",
+                    {"x1": 100, "y1": 200, "x2": 300, "y2": 200}, expect=500)
+            assert_true("drag-trusted returns 500 on mock",
+                        "CDP" in str(r) or "not supported" in str(r) or "cdp" in str(r).lower(),
+                        str(r))
+        except RuntimeError as e:
+            assert_true("drag-trusted endpoint exists (500 on mock)",
+                        "500" in str(e), str(e))
+
         # 12. Scroll
         section("Scroll")
         r = req("POST", "/agent/scroll", {"direction": "down", "amount": 300})

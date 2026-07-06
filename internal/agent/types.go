@@ -127,6 +127,26 @@ type DragOpts struct {
         HoldAtEnd int `json:"holdAtEnd,omitempty"` // ms to hold before mouseup (default 50-200)
 }
 
+// TrustedDragOpts controls a CDP-injected trusted drag. Unlike DragOpts,
+// the events are dispatched via Chrome DevTools Protocol
+// (Input.dispatchMouseEvent) and have isTrusted=true, so they bypass
+// the event.isTrusted check used by Aliyun baxia / Geetest / etc.
+//
+// Coordinates are in CSS pixels relative to the TOP-LEVEL page's viewport
+// (NOT iframe-local). For drags inside an iframe, the caller must add
+// the iframe's getBoundingClientRect offset to iframe-local coordinates.
+type TrustedDragOpts struct {
+        X1 float64 `json:"x1"`
+        Y1 float64 `json:"y1"`
+        X2 float64 `json:"x2"`
+        Y2 float64 `json:"y2"`
+        // Optional tuning (all default to randomized human-like values)
+        Duration  int `json:"duration,omitempty"`  // total ms (default 1000-1500)
+        Steps     int `json:"steps,omitempty"`     // mousemove count (default 50-100)
+        Jitter    int `json:"jitter,omitempty"`    // max px offset from curve (default 3)
+        HoldAtEnd int `json:"holdAtEnd,omitempty"` // ms to hold before mouseup (default 50-200)
+}
+
 // ScreenshotOpts controls a screenshot action.
 type ScreenshotOpts struct {
         FullPage bool `json:"fullPage,omitempty"`

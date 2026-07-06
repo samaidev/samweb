@@ -241,6 +241,11 @@ func (m *MockBackend) Drag(ctx context.Context, opts DragOpts) error {
         return nil
 }
 
+// DragTrusted is not supported on the mock backend (no CDP connection).
+func (m *MockBackend) DragTrusted(ctx context.Context, opts TrustedDragOpts) error {
+        return fmt.Errorf("DragTrusted not supported on mock backend (requires CDP connection)")
+}
+
 func (m *MockBackend) Eval(ctx context.Context, script string) (json.RawMessage, error) {
         m.mu.Lock()
         defer m.mu.Unlock()

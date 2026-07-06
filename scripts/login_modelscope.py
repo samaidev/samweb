@@ -262,6 +262,9 @@ def main():
                 "    if (!doc) return JSON.stringify({error: 'no contentDocument'});"
                 "  } catch(e) { return JSON.stringify({error: 'cross-origin: ' + e.message}); }"
                 "  var doc = iframe.contentDocument;"
+                "  // iframe's offset in top-doc coords (needed for drag-trusted)"
+                "  var ir = iframe.getBoundingClientRect();"
+                "  var ox = ir.left, oy = ir.top;"
                 "  var candidates = ['#nc_1_n1z', '.nc-lang-cnt .btn_slide', "
                 "    '.nc_iconfont.btn_slide', '.scale_text.nc-lang-cnt .btn_slide', "
                 "    '#nc_1_scale_btn', '.nc-lang-cnt .btn_slide', "
@@ -287,11 +290,12 @@ def main():
                 "  }"
                 "  if (h && t) {"
                 "    var hr = h.getBoundingClientRect(), tr = t.getBoundingClientRect();"
-                "    var ir = iframe.getBoundingClientRect();"
+                "    // Return TOP-DOC coords (add iframe offset) so drag-trusted"
+                "    // can use them directly with CDP Input.dispatchMouseEvent."
                 "    return JSON.stringify({"
-                "      handle: {x: hr.left + hr.width/2, y: hr.top + hr.height/2, w: hr.width, h: hr.height},"
-                "      track: {x: tr.left, y: tr.top, w: tr.width, h: tr.height},"
-                "      iframe: {x: ir.left, y: ir.top, w: ir.width, h: ir.height}"
+                "      handle: {x: hr.left + hr.width/2 + ox, y: hr.top + hr.height/2 + oy, w: hr.width, h: hr.height},"
+                "      track: {x: tr.left + ox, y: tr.top + oy, w: tr.width, h: tr.height},"
+                "      iframe: {x: ox, y: oy, w: ir.width, h: ir.height}"
                 "    });"
                 "  }"
                 "  return JSON.stringify({error: 'slider not visible', bodySnippet: doc.body ? doc.body.innerHTML.slice(0,500) : 'no body'});"
@@ -318,14 +322,14 @@ def main():
                     time.sleep(2)
                     continue
                 print(f"    attempt {attempt+1}: dragging from ({hx:.0f},{hy:.0f}) to ({tx:.0f},{ty:.0f})")
-                # Use iframeSelector + selector so the drag dispatches mouse
-                # events on the slider handle INSIDE the baxia iframe.
-                req(base, args.token, "POST", "/agent/drag",
-                    body={"iframeSelector": "#baxia-dialog-content",
-                          "selector": "#nc_1_n1z, .btn_slide",
-                          "x2": tx, "y2": ty,
-                          "duration": 1200, "steps": 80, "jitter": 4},
-                    timeout=20)
+                # Use drag-trusted (CDP Input.dispatchMouseEvent) so the
+                # events have isTrusted=true and bypass baxia's check.
+                # Coordinates must be in TOP-DOC space (add iframe offset
+                # to the iframe-local coords we got from the probe).
+                req(base, args.token, "POST", "/agent/drag-trusted",
+                    body={"x1": hx, "y1": hy, "x2": tx, "y2": ty,
+                          "duration": 1500, "steps": 100, "jitter": 5},
+                    timeout=30)
                 slider_dragged = True
                 print("    drag dispatched, waiting 4s for verification...")
                 time.sleep(4)

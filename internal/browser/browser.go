@@ -22,11 +22,13 @@ import (
         "log"
         "net"
         "net/http"
+        "os"
         "runtime"
         "sync"
         "time"
 
         "github.com/samaidev/samweb/internal/agent"
+        "github.com/samaidev/samweb/internal/cdp"
         "github.com/samaidev/samweb/internal/proxy"
         "github.com/samaidev/samweb/internal/search"
         "github.com/webview/webview_go"
@@ -47,6 +49,13 @@ type Options struct {
         AgentAddr string
         // AgentToken, if non-empty, gates the agent API behind a bearer token.
         AgentToken string
+
+        // CDPPort, if non-zero, enables WebView2's remote debugging port on
+        // the given port. The CDP client is then used by /agent/drag-trusted
+        // to inject trusted mouse events (isTrusted=true) that bypass
+        // anti-bot systems like Aliyun baxia. Defaults to 9222. Set to 0
+        // to disable (then /agent/drag-trusted will return an error).
+        CDPPort int
 }
 
 // Run starts the embedded HTTP servers and opens the webview window. It
@@ -77,6 +86,9 @@ func Run(opts Options) error {
         }
         if opts.AgentAddr == "" {
                 opts.AgentAddr = "0.0.0.0:7777"
+        }
+        if opts.CDPPort == 0 {
+                opts.CDPPort = 9222 // default CDP port for trusted input injection
         }
 
         // Single listener for both UI and proxy so the iframe is same-origin
@@ -114,6 +126,23 @@ func Run(opts Options) error {
         uiURL := fmt.Sprintf("http://127.0.0.1:%d/", uiPort)
         log.Printf("[browser] opening webview -> %s", uiURL)
 
+        // Enable WebView2's remote debugging port so we can connect via CDP
+        // (Chrome DevTools Protocol) and inject trusted input events. This
+        // is the engine-level escape hatch that lets us bypass the
+        // event.isTrusted check used by Aliyun baxia / Geetest / etc.
+        //
+        // On Windows / WebView2, this sets the Chromium --remote-debugging-port
+        // flag. On Linux (WebKitGTK) and macOS (WebKit), this env var is
+        // ignored (CDP is Chromium-specific); those platforms would need a
+        // different approach (e.g. WebKit's WebDriver), which is not
+        // implemented here.
+        if os.Getenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") == "" {
+                os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                        "--remote-debugging-port="+fmt.Sprint(opts.CDPPort))
+                log.Printf("[browser] set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=%s",
+                        os.Getenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"))
+        }
+
         w := webview.New(true)
         defer w.Destroy()
         w.SetTitle(opts.Title)
@@ -149,6 +178,29 @@ func Run(opts Options) error {
         }()
 
         w.Navigate(uiURL)
+
+        // Connect to the CDP endpoint (in a goroutine, retrying for ~10s
+        // while WebView2 spins up the debugging port). The CDP client is
+        // stored on the backend so /agent/drag-trusted can use it.
+        if opts.CDPPort > 0 {
+                go func() {
+                        var cdpClient *cdp.Client
+                        var cdpErr error
+                        for i := 0; i < 20; i++ {
+                                time.Sleep(500 * time.Millisecond)
+                                cdpClient, cdpErr = cdp.ConnectToPage(opts.CDPPort)
+                                if cdpErr == nil {
+                                        break
+                                }
+                        }
+                        if cdpErr != nil {
+                                log.Printf("[browser] CDP connect failed after 10s: %v", cdpErr)
+                                return
+                        }
+                        backend.SetCDPClient(cdpClient)
+                        log.Printf("[browser] CDP client connected on port %d", opts.CDPPort)
+                }()
+        }
 
         w.Run()
 
