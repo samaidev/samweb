@@ -178,3 +178,13 @@ type CapturedRequest struct {
         ResponseBody string `json:"responseBody,omitempty"`
         ResourceType string `json:"resourceType,omitempty"`
 }
+
+// RawMouseOpts controls a single CDP Input.dispatchMouseEvent.
+type RawMouseOpts struct {
+        Type       string  `json:"type"`       // "mousePressed", "mouseReleased", "mouseMoved"
+        X          float64 `json:"x"`
+        Y          float64 `json:"y"`
+        Button     string  `json:"button"`     // "none", "left", "middle", "right"
+        Buttons    int     `json:"buttons"`    // bitmask: 1=left, 2=right, 4=middle
+        ClickCount int     `json:"clickCount"`
+}

@@ -73,6 +73,47 @@ func (c *Client) MouseUp(x, y float64) error {
         return c.DispatchMouse(MouseEventMouseReleased, x, y, MouseButtonLeft, 1, 1)
 }
 
+// DispatchMouseRaw sends a single Input.dispatchMouseEvent with full
+// control over all parameters. This is the low-level primitive that
+// Drag / MouseDown / MouseUp / MouseMove are built on. Exposed so the
+// agent can construct custom event sequences (e.g. mousedown without
+// mouseup, then a series of mousemoves, then mouseup — needed for
+// baxia slider where the handle snaps back if mouseup fires too early).
+type RawMouseOpts struct {
+        Type       string  `json:"type"`       // "mousePressed", "mouseReleased", "mouseMoved"
+        X          float64 `json:"x"`
+        Y          float64 `json:"y"`
+        Button     string  `json:"button"`     // "none", "left", "middle", "right"
+        Buttons    int     `json:"buttons"`    // bitmask: 1=left, 2=right, 4=middle
+        ClickCount int     `json:"clickCount"`
+}
+
+// DispatchRaw sends a single raw mouse event via CDP.
+func (c *Client) DispatchRaw(opts RawMouseOpts) error {
+        _, err := c.send("Input.dispatchMouseEvent", dispatchMouseParams{
+                Type:       MouseEventType(opts.Type),
+                X:          opts.X,
+                Y:          opts.Y,
+                Button:     MouseButton(opts.Button),
+                Buttons:    opts.Buttons,
+                ClickCount: opts.ClickCount,
+        })
+        return err
+}
+
+// DispatchRawAsync sends a single raw mouse event without waiting for
+// response (for high-frequency mousemove sequences).
+func (c *Client) DispatchRawAsync(opts RawMouseOpts) error {
+        return c.sendAsync("Input.dispatchMouseEvent", dispatchMouseParams{
+                Type:       MouseEventType(opts.Type),
+                X:          opts.X,
+                Y:          opts.Y,
+                Button:     MouseButton(opts.Button),
+                Buttons:    opts.Buttons,
+                ClickCount: opts.ClickCount,
+        })
+}
+
 // Drag performs a human-like drag from (x1,y1) to (x2,y2) using trusted
 // CDP mouse events. The trajectory is a cubic bezier with smoothstep
 // easing; inter-event delays are randomized to mimic a human. The

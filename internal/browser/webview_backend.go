@@ -511,3 +511,17 @@ func (b *WebviewBackend) ClearCapturedRequests(ctx context.Context) error {
         c.ClearCapturedRequests()
         return nil
 }
+
+// CDPRawMouse sends a single CDP Input.dispatchMouseEvent.
+func (b *WebviewBackend) CDPRawMouse(ctx context.Context, opts agent.RawMouseOpts) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+        return c.DispatchRaw(cdp.RawMouseOpts{
+                Type: opts.Type, X: opts.X, Y: opts.Y,
+                Button: opts.Button, Buttons: opts.Buttons, ClickCount: opts.ClickCount,
+        })
+}

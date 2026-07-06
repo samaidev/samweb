@@ -48,6 +48,9 @@ type Backend interface {
         GetCapturedRequests(ctx context.Context) ([]CapturedRequest, error)
         ClearCapturedRequests(ctx context.Context) error
 
+        // CDPRawMouse sends a single CDP Input.dispatchMouseEvent.
+        CDPRawMouse(ctx context.Context, opts RawMouseOpts) error
+
         // Inspection
         Eval(ctx context.Context, script string) (json.RawMessage, error)
         Wait(ctx context.Context, selector string, timeoutMs int) error

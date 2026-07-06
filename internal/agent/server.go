@@ -106,6 +106,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/network/disable", s.handleNetworkDisable)
         mux.HandleFunc("/agent/network/requests", s.handleNetworkRequests)
         mux.HandleFunc("/agent/network/clear", s.handleNetworkClear)
+        mux.HandleFunc("/agent/cdp-mouse", s.handleCDPRawMouse)
 
         mux.HandleFunc("/agent/eval", s.handleEval)
         mux.HandleFunc("/agent/wait", s.handleWait)
@@ -457,6 +458,23 @@ func (s *Server) handleNetworkClear(w http.ResponseWriter, r *http.Request) {
         ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
         defer cancel()
         if err := s.backend.ClearCapturedRequests(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleCDPRawMouse sends a single CDP Input.dispatchMouseEvent.
+// Body: {"type":"mousePressed","x":21,"y":245,"button":"left","buttons":1,"clickCount":1}
+func (s *Server) handleCDPRawMouse(w http.ResponseWriter, r *http.Request) {
+        var opts RawMouseOpts
+        if err := readJSON(r, &opts); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        if err := s.backend.CDPRawMouse(ctx, opts); err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return
         }
