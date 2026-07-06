@@ -123,16 +123,18 @@ go build -o samweb ./cmd/samweb
 
 WebKit's iframe element honors `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors`. Most major websites send at least one of these headers, which would cause the iframe to render blank. By fetching the page through a same-origin reverse proxy that strips those headers, SamWeb can embed the page content directly.
 
-The proxy is intentionally minimal: it does not preserve cookies across requests, it does not rewrite resource URLs (so absolute URLs work; relative URLs work because the iframe document is same-origin with the proxy), and it is bound to `127.0.0.1` so it is not reachable from the network.
+The proxy is intentionally minimal: cookies **are** persisted across requests via a shared `cookiejar.Jar` (so sites that require login can maintain state), but resource URLs are not rewritten (absolute URLs work; relative URLs work because the iframe document is same-origin with the proxy). The proxy is bound to `127.0.0.1` so it is not reachable from the network. Use the `POST /agent/reset-cookies` endpoint to clear the cookie jar.
 
 ---
 
 ## Known limitations
 
 - Some sites (Google, YouTube, GitHub) use JavaScript-based frame-busting or post-login redirects that the proxy does not handle — those may show a "refused to connect" message or redirect loop.
-- Cookie persistence across proxy requests is not implemented. Sites that require login will not stay logged in.
+- **Cookie persistence IS implemented** (shared `cookiejar.Jar` in the proxy). Cookies — including login session cookies — are preserved across requests, so sites that require login can maintain state. Use the `POST /agent/reset-cookies` endpoint to clear the jar when you want to start a fresh session (e.g. before a new login attempt).
+- **SPA login flows** (e.g. modelscope.cn, which is a React/UmiJS app) cannot run inside the iframe proxy, because the SPA's `/api/v1/*` XHRs resolve against the proxy origin (`127.0.0.1:<port>`) instead of the upstream host. Use `POST /agent/navigate-direct` to load such sites as the webview's top-level page — the SPA then runs in its natural origin, all relative URLs resolve correctly, and cross-origin scripts (Aliyun havana-login, Aliyun Captcha, etc.) work as designed.
 - Download manager is not implemented.
 - Browser-level devtools are not wired up (you can still open the webview's devtools via right-click on Linux builds if WebKitGTK was compiled with `WEBKIT_DEVELOPER_MODE=ON`).
+- True pixel-perfect screenshots require WebKitGTK's snapshot API which is not exposed by `webview_go`. The agent falls back to an SVG-foreignObject-based renderer that works for most pages, and a text-only PNG fallback when resources fail to load.
 
 These are deliberate scope choices for the initial release. Pull requests welcome.
 
@@ -197,20 +199,22 @@ read-state endpoints use `GET`. Bodies and responses are JSON.
 |--------|------|--------------|-------------|
 | GET  | `/agent/health` | — | Liveness probe (always public, ignores auth token). |
 | GET  | `/agent/state` | — | Current URL, title, tabs, history flags. |
-| POST | `/agent/navigate` | `{"url":"..."}` | Navigate the active tab. |
+| POST | `/agent/navigate` | `{"url":"..."}` | Navigate the active tab through the proxy. |
+| POST | `/agent/navigate-direct` | `{"url":"..."}` | Load the URL as the webview's top-level page, bypassing the iframe proxy. **Required for SPA sites** (React/Vue/UmiJS apps) whose API calls use relative URLs that the proxy cannot rewrite — e.g. modelscope.cn login. |
 | POST | `/agent/back` | — | Go back in history. |
 | POST | `/agent/forward` | — | Go forward in history. |
 | POST | `/agent/reload` | — | Reload the active tab. |
 | POST | `/agent/stop` | — | Stop the current navigation. |
 | POST | `/agent/click` | `{"selector":"..."}` *or* `{"x":N,"y":N}` (optional: `button`,`double`) | Click an element. |
 | POST | `/agent/scroll` | `{"x":N,"y":N}` *or* `{"selector":"..."}` *or* `{"direction":"down","amount":400}` | Scroll the page. |
-| POST | `/agent/type` | `{"selector":"...","text":"..."}` (optional: `clear`,`delayMs`) | Type text into an input. |
+| POST | `/agent/type` | `{"selector":"...","text":"..."}` (optional: `clear`,`delayMs`) | Type text into an input. Uses the native `HTMLInputElement.prototype.value` setter so React/Vue controlled inputs update their internal state correctly. |
 | POST | `/agent/key` | `{"key":"Enter","modifiers":["ctrl","shift"]}` | Press a key. |
 | POST | `/agent/eval` | `{"script":"1+1"}` | Evaluate JS in the iframe; returns the JSON-encoded result. |
 | POST | `/agent/wait` | `{"selector":"...","timeoutMs":5000}` | Wait for an element to appear. |
 | GET  | `/agent/elements?selector=...` | — | All matching elements with coordinates, size, text, attrs, html. |
 | GET  | `/agent/element?selector=...` | — | First matching element (404 if none). |
 | GET  | `/agent/screenshot?fullPage=true` | — | PNG screenshot of the current view. |
+| POST | `/agent/reset-cookies` | — | Clear the proxy's shared cookie jar so the next navigation starts a fresh session (no cached login, no anti-bot `acw_tc`, etc.). Useful before a new login attempt. |
 
 ### Element shape
 
@@ -306,7 +310,7 @@ wait, screenshot (viewport + full-page), stop, and bearer-token auth.
 ## Known limitations
 
 - Some sites (Google, YouTube, GitHub) use JavaScript-based frame-busting or post-login redirects that the proxy does not handle — those may show a "refused to connect" message or redirect loop.
-- Cookie persistence across proxy requests is not implemented. Sites that require login will not stay logged in.
+- Cookie persistence across proxy requests is not implemented. Sites that require login will not stay logged in. (Note: the proxy *does* maintain a shared cookie jar across requests, but it is reset when the process exits — there is no on-disk persistence.)
 - Download manager is not implemented.
 - Browser-level devtools are not wired up (you can still open the webview's devtools via right-click on Linux builds if WebKitGTK was compiled with `WEBKIT_DEVELOPER_MODE=ON`).
 - True pixel-perfect screenshots require WebKitGTK's snapshot API which is not exposed by `webview_go`. The agent falls back to an SVG-foreignObject-based renderer that works for most pages, and a text-only PNG fallback when resources fail to load.

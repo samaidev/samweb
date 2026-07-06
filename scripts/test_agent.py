@@ -260,6 +260,18 @@ def main():
         r = req("POST", "/agent/stop")
         assert_eq("stop ok", r["ok"], True)
 
+        # 16. Reset cookies (new endpoint)
+        section("Reset cookies")
+        r = req("POST", "/agent/reset-cookies")
+        assert_eq("reset-cookies ok", r["ok"], True)
+        # GET on reset-cookies should be 405 method-not-allowed
+        try:
+            req("GET", "/agent/reset-cookies")
+            print("  FAIL: expected 405 for GET on reset-cookies")
+            sys.exit(1)
+        except RuntimeError as e:
+            assert_true("405 for GET on reset-cookies", "405" in str(e), str(e))
+
     finally:
         proc.send_signal(signal.SIGTERM)
         try:

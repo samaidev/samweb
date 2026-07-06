@@ -14,21 +14,21 @@
 package browser
 
 import (
-	"context"
-	"embed"
-	"encoding/json"
-	"fmt"
-	"io/fs"
-	"log"
-	"net"
-	"net/http"
-	"sync"
-	"time"
+        "context"
+        "embed"
+        "encoding/json"
+        "fmt"
+        "io/fs"
+        "log"
+        "net"
+        "net/http"
+        "sync"
+        "time"
 
-	"github.com/samaidev/samweb/internal/agent"
-	"github.com/samaidev/samweb/internal/proxy"
-	"github.com/samaidev/samweb/internal/search"
-	"github.com/webview/webview_go"
+        "github.com/samaidev/samweb/internal/agent"
+        "github.com/samaidev/samweb/internal/proxy"
+        "github.com/samaidev/samweb/internal/search"
+        "github.com/webview/webview_go"
 )
 
 //go:embed all:ui
@@ -36,196 +36,196 @@ var uiFS embed.FS
 
 // Options controls how the browser window is created.
 type Options struct {
-	Title      string
-	Width      int
-	Height     int
-	EngineName string
+        Title      string
+        Width      int
+        Height     int
+        EngineName string
 
-	// AgentAddr is the address the agent HTTP API binds to. Defaults to
-	// "0.0.0.0:7777" so external programs can reach it.
-	AgentAddr string
-	// AgentToken, if non-empty, gates the agent API behind a bearer token.
-	AgentToken string
+        // AgentAddr is the address the agent HTTP API binds to. Defaults to
+        // "0.0.0.0:7777" so external programs can reach it.
+        AgentAddr string
+        // AgentToken, if non-empty, gates the agent API behind a bearer token.
+        AgentToken string
 }
 
 // Run starts the embedded HTTP servers and opens the webview window. It
 // blocks until the window is closed by the user.
 func Run(opts Options) error {
-	if opts.Title == "" {
-		opts.Title = "SamWeb"
-	}
-	if opts.Width <= 0 {
-		opts.Width = 1280
-	}
-	if opts.Height <= 0 {
-		opts.Height = 800
-	}
-	if opts.AgentAddr == "" {
-		opts.AgentAddr = "0.0.0.0:7777"
-	}
+        if opts.Title == "" {
+                opts.Title = "SamWeb"
+        }
+        if opts.Width <= 0 {
+                opts.Width = 1280
+        }
+        if opts.Height <= 0 {
+                opts.Height = 800
+        }
+        if opts.AgentAddr == "" {
+                opts.AgentAddr = "0.0.0.0:7777"
+        }
 
-	// Single listener for both UI and proxy so the iframe is same-origin
-	// with the parent page. Required for the agent to access
-	// iframe.contentDocument.
-	uiLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return fmt.Errorf("listen ui: %w", err)
-	}
-	uiPort := uiLn.Addr().(*net.TCPAddr).Port
+        // Single listener for both UI and proxy so the iframe is same-origin
+        // with the parent page. Required for the agent to access
+        // iframe.contentDocument.
+        uiLn, err := net.Listen("tcp", "127.0.0.1:0")
+        if err != nil {
+                return fmt.Errorf("listen ui: %w", err)
+        }
+        uiPort := uiLn.Addr().(*net.TCPAddr).Port
 
-	// Pick the default search engine based on user option.
-	engine := search.DefaultEngine
-	for _, e := range search.Engines() {
-		if e.Name == opts.EngineName {
-			engine = e
-			break
-		}
-	}
+        // Pick the default search engine based on user option.
+        engine := search.DefaultEngine
+        for _, e := range search.Engines() {
+                if e.Name == opts.EngineName {
+                        engine = e
+                        break
+                }
+        }
 
-	uiSrv := newUIServer(uiPort, engine)
+        uiSrv := newUIServer(uiPort, engine)
 
-	var wg sync.WaitGroup
-	errCh := make(chan error, 4)
+        var wg sync.WaitGroup
+        errCh := make(chan error, 4)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		errCh <- http.Serve(uiLn, uiSrv.handler())
-	}()
+        wg.Add(1)
+        go func() {
+                defer wg.Done()
+                errCh <- http.Serve(uiLn, uiSrv.handler())
+        }()
 
-	// Wait for the UI server before opening the window.
-	waitForReady(uiPort)
+        // Wait for the UI server before opening the window.
+        waitForReady(uiPort)
 
-	uiURL := fmt.Sprintf("http://127.0.0.1:%d/", uiPort)
-	log.Printf("[browser] opening webview -> %s", uiURL)
+        uiURL := fmt.Sprintf("http://127.0.0.1:%d/", uiPort)
+        log.Printf("[browser] opening webview -> %s", uiURL)
 
-	w := webview.New(true)
-	defer w.Destroy()
-	w.SetTitle(opts.Title)
-	w.SetSize(opts.Width, opts.Height, webview.HintNone)
+        w := webview.New(true)
+        defer w.Destroy()
+        w.SetTitle(opts.Title)
+        w.SetSize(opts.Width, opts.Height, webview.HintNone)
 
-	// Bootstrap the agent JS bridge BEFORE the webview navigates, so the
-	// bindings are available when the page loads.
-	w.Init(agentBootstrapJS(uiPort))
-	w.Bind("samwebResolve", func(input string) (string, error) {
-		return search.Resolve(input, engine), nil
-	})
+        // Bootstrap the agent JS bridge BEFORE the webview navigates, so the
+        // bindings are available when the page loads.
+        w.Init(agentBootstrapJS(uiPort))
+        w.Bind("samwebResolve", func(input string) (string, error) {
+                return search.Resolve(input, engine), nil
+        })
 
-	// Build the agent backend and server. NewWebviewBackend registers the
-	// __agentCallback binding; do NOT re-register it here, otherwise the
-	// placeholder would shadow the real handler and every callback would
-	// be logged as an orphan.
-	backend := NewWebviewBackend(w)
+        // Build the agent backend and server. NewWebviewBackend registers the
+        // __agentCallback binding; do NOT re-register it here, otherwise the
+        // placeholder would shadow the real handler and every callback would
+        // be logged as an orphan.
+        backend := NewWebviewBackend(w)
 
-	agentSrv := agent.NewServer(opts.AgentAddr, opts.AgentToken, backend)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		errCh <- agentSrv.ListenAndServe()
-	}()
+        agentSrv := agent.NewServer(opts.AgentAddr, opts.AgentToken, backend)
+        wg.Add(1)
+        go func() {
+                defer wg.Done()
+                errCh <- agentSrv.ListenAndServe()
+        }()
 
-	w.Navigate(uiURL)
-	w.Run()
+        w.Navigate(uiURL)
+        w.Run()
 
-	// After the window closes, shut down the servers so the process can
-	// exit cleanly.
-	_ = agentSrv.Shutdown(gracefulCtx())
-	return nil
+        // After the window closes, shut down the servers so the process can
+        // exit cleanly.
+        _ = agentSrv.Shutdown(gracefulCtx())
+        return nil
 }
 
 // waitForReady polls the UI server's /ready endpoint until it responds.
 func waitForReady(port int) {
-	url := fmt.Sprintf("http://127.0.0.1:%d/ready", port)
-	client := &http.Client{Timeout: 500 * time.Millisecond}
-	for i := 0; i < 50; i++ {
-		resp, err := client.Get(url)
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	log.Printf("[browser] warning: UI server not ready after 2.5s, opening window anyway")
+        url := fmt.Sprintf("http://127.0.0.1:%d/ready", port)
+        client := &http.Client{Timeout: 500 * time.Millisecond}
+        for i := 0; i < 50; i++ {
+                resp, err := client.Get(url)
+                if err == nil {
+                        _ = resp.Body.Close()
+                        if resp.StatusCode == http.StatusOK {
+                                return
+                        }
+                }
+                time.Sleep(50 * time.Millisecond)
+        }
+        log.Printf("[browser] warning: UI server not ready after 2.5s, opening window anyway")
 }
 
 // gracefulCtx returns a context that times out after 2 seconds, used for
 // graceful server shutdown.
 func gracefulCtx() context.Context {
-	ctx, _ := context.WithTimeout(context.Background(), 2*time.Second)
-	return ctx
+        ctx, _ := context.WithTimeout(context.Background(), 2*time.Second)
+        return ctx
 }
 
 // uiServer is the HTTP server that serves the embedded UI assets, the
 // local API used by the frontend, and the proxy that fetches remote pages.
 type uiServer struct {
-	port   int
-	engine search.Engine
+        port   int
+        engine search.Engine
 }
 
 func newUIServer(port int, engine search.Engine) *uiServer {
-	return &uiServer{port: port, engine: engine}
+        return &uiServer{port: port, engine: engine}
 }
 
 func (s *uiServer) handler() http.Handler {
-	mux := http.NewServeMux()
+        mux := http.NewServeMux()
 
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+        mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+                w.WriteHeader(http.StatusOK)
+        })
 
-	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// Same-origin: proxy lives on this same port under /proxy.
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"proxyBase":     fmt.Sprintf("http://127.0.0.1:%d/proxy?url=", s.port),
-			"defaultEngine": s.engine.Name,
-			"engines":       search.Engines(),
-		})
-	})
+        mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+                w.Header().Set("Content-Type", "application/json")
+                // Same-origin: proxy lives on this same port under /proxy.
+                _ = json.NewEncoder(w).Encode(map[string]any{
+                        "proxyBase":     fmt.Sprintf("http://127.0.0.1:%d/proxy?url=", s.port),
+                        "defaultEngine": s.engine.Name,
+                        "engines":       search.Engines(),
+                })
+        })
 
-	mux.HandleFunc("/api/resolve", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query().Get("q")
-		engine := s.engine
-		if name := r.URL.Query().Get("engine"); name != "" {
-			for _, e := range search.Engines() {
-				if e.Name == name {
-					engine = e
-					break
-				}
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"url": search.Resolve(q, engine),
-		})
-	})
+        mux.HandleFunc("/api/resolve", func(w http.ResponseWriter, r *http.Request) {
+                q := r.URL.Query().Get("q")
+                engine := s.engine
+                if name := r.URL.Query().Get("engine"); name != "" {
+                        for _, e := range search.Engines() {
+                                if e.Name == name {
+                                        engine = e
+                                        break
+                                }
+                        }
+                }
+                w.Header().Set("Content-Type", "application/json")
+                _ = json.NewEncoder(w).Encode(map[string]any{
+                        "url": search.Resolve(q, engine),
+                })
+        })
 
-	// Proxy lives on the same port so the iframe is same-origin with the
-	// parent page. The agent's JS code relies on this to access
-	// iframe.contentDocument.
-	proxyHandler := func(w http.ResponseWriter, r *http.Request) {
-		target := r.URL.Query().Get("url")
-		if target == "" {
-			http.Error(w, "missing url parameter", http.StatusBadRequest)
-			return
-		}
-		// Inline the proxy fetch here so we share the same http.ServeMux.
-		// The proxy package exposes a stateless fetch function for this.
-		proxy.ServeHTTP(w, r, target)
-	}
-	mux.HandleFunc("/proxy", proxyHandler)
+        // Proxy lives on the same port so the iframe is same-origin with the
+        // parent page. The agent's JS code relies on this to access
+        // iframe.contentDocument.
+        proxyHandler := func(w http.ResponseWriter, r *http.Request) {
+                target := r.URL.Query().Get("url")
+                if target == "" {
+                        http.Error(w, "missing url parameter", http.StatusBadRequest)
+                        return
+                }
+                // Inline the proxy fetch here so we share the same http.ServeMux.
+                // The proxy package exposes a stateless fetch function for this.
+                proxy.ServeHTTP(w, r, target)
+        }
+        mux.HandleFunc("/proxy", proxyHandler)
 
-	// Serve embedded UI files from the "ui" subdirectory, stripping the
-	// "ui/" prefix so that the SPA index.html is served at "/".
-	sub, err := fs.Sub(uiFS, "ui")
-	if err != nil {
-		log.Fatalf("[browser] cannot sub embed fs: %v", err)
-	}
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+        // Serve embedded UI files from the "ui" subdirectory, stripping the
+        // "ui/" prefix so that the SPA index.html is served at "/".
+        sub, err := fs.Sub(uiFS, "ui")
+        if err != nil {
+                log.Fatalf("[browser] cannot sub embed fs: %v", err)
+        }
+        mux.Handle("/", http.FileServer(http.FS(sub)))
 
-	return mux
+        return mux
 }
 
 // agentBootstrapJS is the JS that runs once when the webview initializes.
@@ -233,7 +233,7 @@ func (s *uiServer) handler() http.Handler {
 // The uiPort is needed so the JS knows where to send navigate commands and
 // where the proxy lives (both on the same port for same-origin access).
 func agentBootstrapJS(uiPort int) string {
-	return fmt.Sprintf(`
+        return fmt.Sprintf(`
 window.__samwebAgent = (function() {
   var UI_PORT = %d;
   var UI_BASE = 'http://127.0.0.1:' + UI_PORT;
@@ -363,13 +363,40 @@ window.__samwebAgent = (function() {
         el = d.elementFromPoint(p.x, p.y);
       }
       if (!el) throw new Error('element not found for type');
+      // Use the native value setter to bypass React's synthetic event
+      // system. React tracks the previous value of a controlled input and
+      // only fires onChange if the native setter was used; assigning
+      // el.value directly leaves React's internal state out of sync, so
+      // the form looks empty when the SPA submits it (a well-known
+      // Playwright/Puppeteer issue).
+      var setInputValue = null, setTextareaValue = null;
+      try {
+        setInputValue = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value').set;
+      } catch (e) {}
+      try {
+        setTextareaValue = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype, 'value').set;
+      } catch (e) {}
+      function applyValue(target, value) {
+        if (target instanceof HTMLTextAreaElement && setTextareaValue) {
+          setTextareaValue.call(target, value);
+        } else if (setInputValue) {
+          setInputValue.call(target, value);
+        } else {
+          target.value = value; // fallback
+        }
+      }
       if (p.clear) {
-        if ('value' in el) el.value = '';
+        if ('value' in el) applyValue(el, '');
         else el.textContent = '';
       }
       if ('value' in el) {
-        el.value += p.text;
-        el.dispatchEvent(new Event('input', {bubbles: true}));
+        applyValue(el, el.value + p.text);
+        // InputEvent (bubbles=true) is what React's onChange actually
+        // listens for; Event('input') works for vanilla JS but not for
+        // React 16+ controlled components.
+        el.dispatchEvent(new InputEvent('input', {bubbles: true, cancelable: true, inputType: 'insertText', data: p.text}));
         el.dispatchEvent(new Event('change', {bubbles: true}));
       } else {
         el.textContent += p.text;

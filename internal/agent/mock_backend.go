@@ -82,18 +82,18 @@ func (m *MockBackend) loadFakePage(url, title string) {
 // ----------------------------- Backend impl -----------------------------
 
 func (m *MockBackend) Navigate(ctx context.Context, url string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// Trim forward history if navigating from the middle.
-	m.history = m.history[:m.histIdx+1]
-	m.history = append(m.history, url)
-	m.histIdx = len(m.history) - 1
-	m.loadFakePage(url, "Example Search: "+url)
-	return nil
+        m.mu.Lock()
+        defer m.mu.Unlock()
+        // Trim forward history if navigating from the middle.
+        m.history = m.history[:m.histIdx+1]
+        m.history = append(m.history, url)
+        m.histIdx = len(m.history) - 1
+        m.loadFakePage(url, "Example Search: "+url)
+        return nil
 }
 
 func (m *MockBackend) NavigateDirect(ctx context.Context, url string) error {
-	return m.Navigate(ctx, url)
+        return m.Navigate(ctx, url)
 }
 
 func (m *MockBackend) Back(ctx context.Context) error {
@@ -150,6 +150,19 @@ func (m *MockBackend) Click(ctx context.Context, opts ClickOpts) error {
         }
         return fmt.Errorf("click requires selector or x,y")
 }
+
+// LastClick returns the selector (or element ID) of the element most
+// recently clicked via Click. It is intended for test assertions.
+func (m *MockBackend) LastClick() string {
+        m.mu.Lock()
+        defer m.mu.Unlock()
+        return m.lastClick
+}
+
+// ResetCookies is a no-op on the mock backend, which has no cookie jar.
+// It exists so the Backend interface can include a ResetCookies method
+// without forcing every implementation to be aware of it.
+func (m *MockBackend) ResetCookies(ctx context.Context) error { return nil }
 
 func (m *MockBackend) Scroll(ctx context.Context, opts ScrollOpts) error {
         m.mu.Lock()
