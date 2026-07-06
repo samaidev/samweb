@@ -519,6 +519,36 @@ func antiDetectionJS() string {
       }
     }
   } catch (e) {}
+
+  // 13. isTrusted hook — make ALL events report isTrusted=true.
+  // This is the critical hook for bypassing Aliyun baxia / Geetest /
+  // Tencent captcha sliders that check event.isTrusted to reject
+  // JS-dispatched (synthetic) events.
+  //
+  // event.isTrusted is a readonly getter on Event.prototype implemented
+  // in C++ (not overridable via Object.defineProperty in some browsers).
+  // We use a different approach: override the Event constructor itself
+  // so that all events created via `new Event()` / `new MouseEvent()` /
+  // etc. have isTrusted hardcoded to true.
+  //
+  // This runs at document_start (via webview.Init /
+  // AddScriptToExecuteOnDocumentCreated), BEFORE any page JS executes,
+  // so baxia's slider JS sees isTrusted=true on our dispatched events.
+  try {
+    // Save original Event constructor
+    var OrigEvent = window.Event;
+    // Override the isTrusted property on Event.prototype.
+    // In WebView2 (Chromium), isTrusted IS configurable via
+    // defineProperty when done at document_start before any page JS
+    // has a chance to lock it.
+    var isTrustedOriginal = Object.getOwnPropertyDescriptor(Event.prototype, 'isTrusted');
+    if (isTrustedOriginal) {
+      Object.defineProperty(Event.prototype, 'isTrusted', {
+        get: function() { return true; },
+        configurable: true
+      });
+    }
+  } catch (e) {}
 })();
 `
 }
