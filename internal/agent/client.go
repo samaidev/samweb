@@ -148,6 +148,12 @@ func (c *Client) PressKey(ctx context.Context, opts KeyOpts) error {
         return c.do(ctx, "POST", "/agent/key", opts, nil)
 }
 
+// Drag dispatches a human-like drag (cubic bezier + jitter + random
+// delays) from one element/point to another. Used for slider captchas.
+func (c *Client) Drag(ctx context.Context, opts DragOpts) error {
+        return c.do(ctx, "POST", "/agent/drag", opts, nil)
+}
+
 // Eval evaluates a JavaScript expression and returns the JSON-encoded result.
 func (c *Client) Eval(ctx context.Context, script string) (json.RawMessage, error) {
         var res EvalResult

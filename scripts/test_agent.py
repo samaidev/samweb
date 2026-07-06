@@ -226,6 +226,18 @@ def main():
         r = req("POST", "/agent/key", {"key": "a", "modifiers": ["ctrl"]})
         assert_eq("key+modifier ok", r["ok"], True)
 
+        # 11b. Drag (new endpoint — mocked, just verify it accepts the body)
+        section("Drag")
+        r = req("POST", "/agent/drag", {"x1": 100, "y1": 200, "x2": 300, "y2": 200})
+        assert_eq("drag ok", r["ok"], True)
+        # Bad request: missing both start and end
+        try:
+            req("POST", "/agent/drag", {})
+            print("  FAIL: expected 400 for empty drag")
+            sys.exit(1)
+        except RuntimeError as e:
+            assert_true("400 for empty drag", "400" in str(e), str(e))
+
         # 12. Scroll
         section("Scroll")
         r = req("POST", "/agent/scroll", {"direction": "down", "amount": 300})

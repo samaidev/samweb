@@ -234,6 +234,13 @@ func (m *MockBackend) PressKey(ctx context.Context, opts KeyOpts) error {
         return nil
 }
 
+// Drag is a no-op on the mock backend (it has no real DOM to dispatch
+// mouse events to). The real WebviewBackend dispatches the drag via
+// the agent JS bridge.
+func (m *MockBackend) Drag(ctx context.Context, opts DragOpts) error {
+        return nil
+}
+
 func (m *MockBackend) Eval(ctx context.Context, script string) (json.RawMessage, error) {
         m.mu.Lock()
         defer m.mu.Unlock()

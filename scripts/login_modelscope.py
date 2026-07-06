@@ -204,22 +204,79 @@ def main():
     else:
         print("\n[5] No password provided — you must type it in the webview window")
 
-    # 7. Wait for the user to complete the captcha + click Login in the
-    #    visible webview window. We poll /api/v1/users/me.
-    print(f"\n[7] Waiting up to {args.login_wait}s for you to complete the captcha + login "
-          f"in the webview window...")
-    print("    (Aliyun NoCaptcha cannot be auto-bypassed; you must drag the slider)")
+    # 7. Try to auto-detect and drag the Aliyun NoCaptcha slider.
+    #    The slider appears as #nc_1_n1z (the drag handle) inside an
+    #    element with class .nc-container. We drag from the handle to
+    #    the right edge of the slider track.
+    print(f"\n[7] Attempting to auto-drag the Aliyun NoCaptcha slider...")
+    slider_dragged = False
+    for attempt in range(3):
+        try:
+            # Look for the slider handle. Aliyun baxia uses several
+            # possible IDs depending on version: #nc_1_n1z, #nc_1__scale_
+            # and class .btn_slide, .nc_iconfont
+            script = (
+                "var h = document.querySelector('#nc_1_n1z, .nc-lang-cnt .btn_slide, "
+                ".nc_iconfont.btn_slide, .scale_text.nc-lang-cnt .btn_slide, "
+                "#nc_1_scale_btn, .nc-lang-cnt .btn_slide'); "
+                "var t = document.querySelector('.nc-lang-cnt, .scale_text, .nc-container .nc-lang-cnt'); "
+                "if (h && t) { JSON.stringify({handle: {x: h.getBoundingClientRect().left + h.getBoundingClientRect().width/2, y: h.getBoundingClientRect().top + h.getBoundingClientRect().height/2, w: h.getBoundingClientRect().width, h: h.getBoundingClientRect().height}, track: {x: t.getBoundingClientRect().left, y: t.getBoundingClientRect().top, w: t.getBoundingClientRect().width, h: t.getBoundingClientRect().height}}) } else { 'null' }"
+            )
+            s, body = _eval(base, args.token, script)
+            if body and body != "null" and body != '"null"':
+                import json as _json
+                # body may be a JSON string wrapped in quotes
+                while body.startswith('"') and body.endswith('"') and len(body) > 2:
+                    body = body[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+                pos = _json.loads(body)
+                hx, hy = pos["handle"]["x"], pos["handle"]["y"]
+                # Drag horizontally to the end of the track
+                tx = pos["track"]["x"] + pos["track"]["w"] - 10
+                ty = hy  # keep y the same
+                print(f"    attempt {attempt+1}: dragging from ({hx:.0f},{hy:.0f}) to ({tx:.0f},{ty:.0f})")
+                req(base, args.token, "POST", "/agent/drag",
+                    body={"x1": hx, "y1": hy, "x2": tx, "y2": ty,
+                          "duration": 1200, "steps": 80, "jitter": 4},
+                    timeout=20)
+                slider_dragged = True
+                print("    drag dispatched, waiting 3s for verification...")
+                time.sleep(3)
+                # Check if slider passed
+                script2 = "var r = document.querySelector('.nc-lang-cnt .nc_ok, .icon_ok'); r ? 'passed' : (document.querySelector('.errloading, .nc-lang-cnt .err') ? 'failed' : 'pending')"
+                s2, body2 = _eval(base, args.token, script2)
+                print(f"    slider state: {body2}")
+                if "passed" in str(body2):
+                    print("    slider PASSED!")
+                    break
+                # If failed or pending, retry
+            else:
+                print(f"    attempt {attempt+1}: slider not found (may not have rendered yet)")
+        except Exception as e:
+            print(f"    attempt {attempt+1} failed: {e}")
+        time.sleep(2)
+
+    if slider_dragged:
+        # Try to click the login button
+        print("\n[8] Clicking login button...")
+        try:
+            req(base, args.token, "POST", "/agent/click",
+                body={"selector": ".fm-button.fm-submit"}, timeout=10)
+            print("    clicked login")
+        except Exception as e:
+            print(f"    click failed: {e}")
+    else:
+        print("\n[8] Could not auto-drag slider. You may need to complete it manually.")
+
+    # 9. Wait for login to complete (URL redirect to modelscope.cn)
+    print(f"\n[9] Waiting up to {args.login_wait}s for login to complete...")
     deadline = time.time() + args.login_wait
     last_state = ""
     while time.time() < deadline:
         try:
-            # Check current URL — if we've been redirected back to
-            # modelscope.cn, login likely succeeded.
             r = req(base, args.token, "GET", "/agent/state", timeout=10)
             url = r.get("url", "")
             if "modelscope.cn" in url and "passport.modelscope.cn" not in url:
                 print(f"    redirected to {url} — login likely succeeded")
-                # Verify with whoami
                 if is_logged_in(base, args.token):
                     break
             if url != last_state:
@@ -232,11 +289,11 @@ def main():
         print("\n>>> Timed out waiting for login. Cookies not saved.")
         return 1
 
-    # 8. Save cookies for next time
+    # 10. Save cookies for next time
     if args.no_save:
-        print("\n[8] Skipping cookie save (--no-save)")
+        print("\n[10] Skipping cookie save (--no-save)")
     else:
-        print("\n[8] Saving cookies for next launch...")
+        print("\n[10] Saving cookies for next launch...")
         try:
             req(base, args.token, "POST", "/agent/save-cookies")
             print("    cookies saved — next launch will skip login entirely")

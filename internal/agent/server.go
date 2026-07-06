@@ -99,6 +99,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/scroll", s.handleScroll)
         mux.HandleFunc("/agent/type", s.handleType)
         mux.HandleFunc("/agent/key", s.handleKey)
+        mux.HandleFunc("/agent/drag", s.handleDrag)
 
         mux.HandleFunc("/agent/eval", s.handleEval)
         mux.HandleFunc("/agent/wait", s.handleWait)
@@ -330,6 +331,35 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 
         defer cancel()
         if err := s.backend.PressKey(ctx, opts); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleDrag dispatches a human-like drag (cubic bezier + jitter + random
+// delays) from one element/point to another. Used for slider captchas.
+func (s *Server) handleDrag(w http.ResponseWriter, r *http.Request) {
+        var opts DragOpts
+        if err := readJSON(r, &opts); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        // Require either start selector or x1,y1
+        if opts.Selector == "" && opts.X1 == 0 && opts.Y1 == 0 {
+                writeError(w, http.StatusBadRequest, "either selector or x1,y1 is required")
+                return
+        }
+        // Require either end selector2 or x2,y2
+        if opts.Selector2 == "" && opts.X2 == 0 && opts.Y2 == 0 {
+                writeError(w, http.StatusBadRequest, "either selector2 or x2,y2 is required")
+                return
+        }
+        // Drag can take 1-2 seconds (duration + holdAtEnd); allow up to 10s.
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+
+        defer cancel()
+        if err := s.backend.Drag(ctx, opts); err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return
         }

@@ -165,6 +165,9 @@ func (b *WebviewBackend) Type(ctx context.Context, opts agent.TypeOpts) error {
 func (b *WebviewBackend) PressKey(ctx context.Context, opts agent.KeyOpts) error {
         return b.dispatchVoid(ctx, "key", opts)
 }
+func (b *WebviewBackend) Drag(ctx context.Context, opts agent.DragOpts) error {
+        return b.dispatchVoid(ctx, "drag", opts)
+}
 
 func (b *WebviewBackend) Eval(ctx context.Context, script string) (json.RawMessage, error) {
         out, err := b.dispatch(ctx, "eval", map[string]string{"script": script})

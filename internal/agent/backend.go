@@ -28,6 +28,7 @@ type Backend interface {
         Scroll(ctx context.Context, opts ScrollOpts) error
         Type(ctx context.Context, opts TypeOpts) error
         PressKey(ctx context.Context, opts KeyOpts) error
+        Drag(ctx context.Context, opts DragOpts) error
 
         // Inspection
         Eval(ctx context.Context, script string) (json.RawMessage, error)
