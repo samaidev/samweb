@@ -19,11 +19,16 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
-REPO = "/home/z/my-project/samweb"
-BINARY = os.path.join(REPO, "samweb-agent-test")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Pick the right binary name for the current OS.
+if os.name == "nt":
+    BINARY = os.path.join(REPO, "samweb-agent-test.exe")
+    DOWNLOAD_DIR = os.path.join(os.environ.get("USERPROFILE", "C:\\"), "Downloads")
+else:
+    BINARY = os.path.join(REPO, "samweb-agent-test")
+    DOWNLOAD_DIR = "/home/z/my-project/download"
 ADDR = "127.0.0.1:7788"
 BASE = f"http://{ADDR}"
-DOWNLOAD_DIR = "/home/z/my-project/download"
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
