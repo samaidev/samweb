@@ -54,7 +54,7 @@ samweb/
 
 ### Prerequisites
 
-You need **Go 1.22+** and the WebKitGTK development headers:
+You need **Go 1.25+** (or Go 1.24+ with `GOTOOLCHAIN=go1.25.0+auto`) and the platform webview development headers:
 
 | OS | Install command |
 |----|-----------------|
@@ -62,7 +62,7 @@ You need **Go 1.22+** and the WebKitGTK development headers:
 | Fedora | `sudo dnf install webkit2gtk4.1-devel gtk3-devel pkgconf-pkg-config` |
 | Arch Linux | `sudo pacman -S webkit2gtk-4.1 gtk3 pkgconf` |
 | macOS | (uses system WebKit; no extra packages) `brew install pkg-config` |
-| Windows | (uses WebView2; runtime ships with Windows 11) |
+| Windows | (uses WebView2; runtime ships with Windows 11). **You also need `WebView2Loader.dll`** in the same directory as `samweb.exe`. Download it from the [Microsoft.Web.WebView2 NuGet package](https://www.nuget.org/packages/Microsoft.Web.WebView2) (`build/native/x64/WebView2Loader.dll`). |
 
 ### Build from source
 
@@ -72,6 +72,48 @@ cd samweb
 go build -o samweb ./cmd/samweb
 ./samweb
 ```
+
+### Windows build notes
+
+On Windows, `webview_go` requires `WebView2Loader.dll` to be present in
+the same directory as `samweb.exe` at runtime. The build itself does
+**not** need the DLL (it links the WebView2 headers statically), but
+running `samweb.exe` without the DLL next to it will fail silently:
+the process starts, the agent API responds to `/agent/health`, but
+`/agent/state` and every other JS-dependent endpoint hangs forever
+because WebView2 cannot initialize.
+
+To get the DLL:
+
+```powershell
+# Download the NuGet package and extract just the x64 loader
+Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.2903.40" -OutFile webview2.nupkg
+Expand-Archive webview2.nupkg -DestinationPath webview2pkg
+Copy-Item webview2pkg\build\native\x64\WebView2Loader.dll .
+```
+
+### Running on Windows from an SSH session
+
+If you SSH into a Windows machine and start `samweb.exe`, the process
+will run in Session 0 which has no interactive desktop, and WebView2
+will not be able to create a visible window. The agent API will
+appear to start (`/agent/health` responds) but `/agent/state` will
+time out.
+
+To run samweb in the user's interactive session, use `schtasks /IT`
+or PsExec `-i <session_id>`:
+
+```powershell
+# Create a one-shot task that runs in the logged-on user's session
+schtasks /Create /TN samweb_run /TR "C:\path\to\samweb.exe --agent-addr 127.0.0.1:7777 --agent-token secret" /SC ONCE /ST 23:59 /RL HIGHEST /IT /F
+schtasks /Run /TN samweb_run
+
+# Or use PsExec (download from Sysinternals)
+PsExec64.exe -i 3 -d samweb.exe --agent-addr 127.0.0.1:7777 --agent-token secret
+```
+
+Use `query session` to find the active session ID (usually 3 for the
+first RDP logon).
 
 ### Run with options
 
