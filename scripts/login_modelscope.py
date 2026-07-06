@@ -206,7 +206,9 @@ def main():
 
     # 7. Click the login button FIRST — on modelscope's passport page,
     #    the Aliyun NoCaptcha slider is hidden by default and only
-    #    appears after the user clicks "登录". Once visible, we auto-drag.
+    #    appears after the user clicks "登录". The slider actually
+    #    appears inside a same-origin iframe #baxia-dialog-content (also
+    #    on passport.modelscope.cn), so we CAN reach into it.
     print(f"\n[7] Clicking login button to trigger slider...")
     try:
         req(base, args.token, "POST", "/agent/click",
@@ -214,33 +216,43 @@ def main():
         print("    clicked login button")
     except Exception as e:
         print(f"    click failed: {e}")
-    # Wait for slider to render
-    time.sleep(3)
+    # Wait for slider iframe to load
+    time.sleep(4)
 
-    # 8. Now try to auto-detect and drag the slider.
-    print(f"\n[8] Attempting to auto-drag the Aliyun NoCaptcha slider...")
+    # 8. Auto-detect and drag the slider inside #baxia-dialog-content iframe.
+    #    The iframe is same-origin (passport.modelscope.cn), so we can
+    #    reach into its contentDocument to find the slider handle.
+    print(f"\n[8] Attempting to auto-drag the Aliyun baxia slider (in iframe)...")
     slider_dragged = False
     for attempt in range(5):
         try:
+            # Look for the slider handle INSIDE the baxia iframe.
             script = (
                 "(function() {"
+                "  var iframe = document.getElementById('baxia-dialog-content');"
+                "  if (!iframe) return JSON.stringify({error: 'no baxia iframe'});"
+                "  try {"
+                "    var doc = iframe.contentDocument;"
+                "    if (!doc) return JSON.stringify({error: 'no contentDocument'});"
+                "  } catch(e) { return JSON.stringify({error: 'cross-origin: ' + e.message}); }"
+                "  var doc = iframe.contentDocument;"
                 "  var candidates = ['#nc_1_n1z', '.nc-lang-cnt .btn_slide', "
                 "    '.nc_iconfont.btn_slide', '.scale_text.nc-lang-cnt .btn_slide', "
                 "    '#nc_1_scale_btn', '.nc-lang-cnt .btn_slide', "
-                "    '.btn_slide', '#aliyunCaptcha-btn'];"
+                "    '.btn_slide', '#aliyunCaptcha-btn', '.slide-btn', '#nc_1_n1c'];"
                 "  var h = null;"
                 "  for (var i = 0; i < candidates.length; i++) {"
-                "    h = document.querySelector(candidates[i]);"
+                "    h = doc.querySelector(candidates[i]);"
                 "    if (h) {"
                 "      var r = h.getBoundingClientRect();"
                 "      if (r.width > 0 && r.height > 0) break;"
                 "      h = null;"
                 "    }"
                 "  }"
-                "  var tSelectors = ['.nc-lang-cnt', '.scale_text', '.nc-container .nc-lang-cnt', '.nc-container', '#aliyunCaptcha-slide-bar'];"
+                "  var tSelectors = ['.nc-lang-cnt', '.scale_text', '.nc-container .nc-lang-cnt', '.nc-container', '#aliyunCaptcha-slide-bar', '.nc_scale', '#nc_1_n1t'];"
                 "  var t = null;"
                 "  for (var j = 0; j < tSelectors.length; j++) {"
-                "    t = document.querySelector(tSelectors[j]);"
+                "    t = doc.querySelector(tSelectors[j]);"
                 "    if (t) {"
                 "      var tr = t.getBoundingClientRect();"
                 "      if (tr.width > 0 && tr.height > 0) break;"
@@ -249,38 +261,50 @@ def main():
                 "  }"
                 "  if (h && t) {"
                 "    var hr = h.getBoundingClientRect(), tr = t.getBoundingClientRect();"
-                "    return JSON.stringify({handle: {x: hr.left + hr.width/2, y: hr.top + hr.height/2, w: hr.width, h: hr.height}, track: {x: tr.left, y: tr.top, w: tr.width, h: tr.height}});"
+                "    var ir = iframe.getBoundingClientRect();"
+                "    return JSON.stringify({"
+                "      handle: {x: hr.left + hr.width/2, y: hr.top + hr.height/2, w: hr.width, h: hr.height},"
+                "      track: {x: tr.left, y: tr.top, w: tr.width, h: tr.height},"
+                "      iframe: {x: ir.left, y: ir.top, w: ir.width, h: ir.height}"
+                "    });"
                 "  }"
-                "  return 'null';"
+                "  return JSON.stringify({error: 'slider not visible', bodySnippet: doc.body ? doc.body.innerHTML.slice(0,500) : 'no body'});"
                 "})()"
             )
             s, body = _eval(base, args.token, script)
+            # Unwrap nested JSON string quotes
             if body and body != "null" and body != '"null"':
                 import json as _json
                 while body.startswith('"') and body.endswith('"') and len(body) > 2:
                     body = body[1:-1].replace('\\"', '"').replace('\\\\', '\\')
                 pos = _json.loads(body)
+                if "error" in pos:
+                    print(f"    attempt {attempt+1}: {pos['error']}")
+                    if "bodySnippet" in pos:
+                        print(f"    iframe body snippet: {pos['bodySnippet'][:300]}")
+                    time.sleep(2)
+                    continue
                 hx, hy = pos["handle"]["x"], pos["handle"]["y"]
                 tx = pos["track"]["x"] + pos["track"]["w"] - 10
                 ty = hy
                 if hx == 0 and hy == 0 and tx <= 0:
-                    print(f"    attempt {attempt+1}: slider coords invalid (still rendering?)")
+                    print(f"    attempt {attempt+1}: slider coords invalid")
                     time.sleep(2)
                     continue
                 print(f"    attempt {attempt+1}: dragging from ({hx:.0f},{hy:.0f}) to ({tx:.0f},{ty:.0f})")
+                # Use iframeSelector + selector so the drag dispatches mouse
+                # events on the slider handle INSIDE the baxia iframe.
                 req(base, args.token, "POST", "/agent/drag",
-                    body={"x1": hx, "y1": hy, "x2": tx, "y2": ty,
+                    body={"iframeSelector": "#baxia-dialog-content",
+                          "selector": "#nc_1_n1z, .btn_slide",
+                          "x2": tx, "y2": ty,
                           "duration": 1200, "steps": 80, "jitter": 4},
                     timeout=20)
                 slider_dragged = True
                 print("    drag dispatched, waiting 4s for verification...")
                 time.sleep(4)
-                # Check if slider passed
-                script2 = ("(function() {"
-                           "  if (document.querySelector('.nc-lang-cnt .nc_ok, .icon_ok, .nc_iconfont.icon_ok')) return 'passed';"
-                           "  if (document.querySelector('.errloading, .nc-lang-cnt .err, .nc-lang-cnt .nc_iconfont.btn_warn')) return 'failed';"
-                           "  return 'pending';"
-                           "})()")
+                # Check if slider passed (look in iframe)
+                script2 = ("(function(){var iframe=document.getElementById('baxia-dialog-content');if(!iframe)return 'no iframe';try{var doc=iframe.contentDocument;if(!doc)return 'no doc';if(doc.querySelector('.nc-lang-cnt .nc_ok, .icon_ok, .nc_iconfont.icon_ok'))return 'passed';if(doc.querySelector('.errloading, .nc-lang-cnt .err, .nc-lang-cnt .nc_iconfont.btn_warn'))return 'failed';return 'pending'}catch(e){return 'err: '+e.message}})()")
                 s2, body2 = _eval(base, args.token, script2)
                 print(f"    slider state: {body2}")
                 if "passed" in str(body2):
@@ -288,7 +312,7 @@ def main():
                     break
                 time.sleep(2)
             else:
-                print(f"    attempt {attempt+1}: slider not visible yet, waiting...")
+                print(f"    attempt {attempt+1}: no response from slider probe")
                 time.sleep(2)
         except Exception as e:
             print(f"    attempt {attempt+1} failed: {e}")

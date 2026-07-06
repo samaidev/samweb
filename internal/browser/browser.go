@@ -582,6 +582,8 @@ window.__samwebAgent = (function() {
     //
     // Required: {x1,y1,x2,y2} OR {selector,x2,y2} OR {selector1,selector2}
     // Optional:
+    //   iframeSelector - if set, selector/selector2 are resolved inside
+    //     this iframe (same-origin only). Used for baxia punish iframe.
     //   duration   - total drag time in ms (default 800-1500, randomized)
     //   steps      - number of mousemove events (default 50-100, randomized)
     //   jitter     - max pixel offset from the bezier curve (default 3)
@@ -591,29 +593,55 @@ window.__samwebAgent = (function() {
         var d = getFrameDoc();
         var w = iwin();
 
-        // Resolve start point
+        // If iframeSelector is set, switch to that iframe's document.
+        // This is needed for Aliyun baxia, which loads the slider in a
+        // same-origin iframe (#baxia-dialog-content).
+        var iframeDoc = d;
+        var iframeWin = w;
+        var iframeOffsetX = 0, iframeOffsetY = 0; // offset of iframe within top doc
+        if (p.iframeSelector) {
+          var iframe = d.querySelector(p.iframeSelector);
+          if (!iframe) throw new Error('iframe not found: ' + p.iframeSelector);
+          try {
+            iframeDoc = iframe.contentDocument;
+            iframeWin = iframe.contentWindow;
+            if (!iframeDoc) throw new Error('iframe contentDocument is null (cross-origin?)');
+            // getBoundingClientRect on the iframe element gives its
+            // position in the top doc. Element coords inside the iframe
+            // are relative to the iframe's own viewport, so to get
+            // top-doc coords we add this offset.
+            var ir0 = iframe.getBoundingClientRect();
+            iframeOffsetX = ir0.left;
+            iframeOffsetY = ir0.top;
+          } catch (e) {
+            throw new Error('cannot access iframe: ' + e.message);
+          }
+        }
+
+        // Resolve start point. Coordinates are kept in TOP-DOC space
+        // (we add iframeOffset to iframe-local coords from selectors).
         var x1, y1, x2, y2;
         if (p.selector) {
-          var el1 = d.querySelector(p.selector);
+          var el1 = iframeDoc.querySelector(p.selector);
           if (!el1) throw new Error('element not found: ' + p.selector);
           var r1 = el1.getBoundingClientRect();
-          // Use the center of the element (sliders are usually centered)
-          x1 = r1.left + r1.width / 2;
-          y1 = r1.top + r1.height / 2;
+          // r1 is iframe-local; add iframeOffset to get top-doc coords
+          x1 = r1.left + r1.width / 2 + iframeOffsetX;
+          y1 = r1.top + r1.height / 2 + iframeOffsetY;
         } else if (p.x1 !== undefined && p.y1 !== undefined) {
-          x1 = p.x1; y1 = p.y1;
+          x1 = p.x1; y1 = p.y1; // caller-provided, assumed top-doc
         } else {
           throw new Error('drag requires selector or x1,y1');
         }
 
         if (p.selector2) {
-          var el2 = d.querySelector(p.selector2);
+          var el2 = iframeDoc.querySelector(p.selector2);
           if (!el2) throw new Error('element not found: ' + p.selector2);
           var r2 = el2.getBoundingClientRect();
-          x2 = r2.left + r2.width / 2;
-          y2 = r2.top + r2.height / 2;
+          x2 = r2.left + r2.width / 2 + iframeOffsetX;
+          y2 = r2.top + r2.height / 2 + iframeOffsetY;
         } else if (p.x2 !== undefined && p.y2 !== undefined) {
-          x2 = p.x2; y2 = p.y2;
+          x2 = p.x2; y2 = p.y2; // caller-provided, assumed top-doc
         } else {
           throw new Error('drag requires selector2 or x2,y2');
         }
@@ -644,10 +672,26 @@ window.__samwebAgent = (function() {
 
         // Find the element under the start point so we dispatch
         // mousedown on it (sliders track mousedown on the handle).
-        var target = p.selector ? d.querySelector(p.selector) : d.elementFromPoint(x1, y1);
+        var target;
+        if (p.selector) {
+          target = iframeDoc.querySelector(p.selector);
+        } else if (p.iframeSelector) {
+          // Convert top-doc coords to iframe-local for elementFromPoint
+          target = iframeDoc.elementFromPoint(x1 - iframeOffsetX, y1 - iframeOffsetY);
+        } else {
+          target = d.elementFromPoint(x1, y1);
+        }
         if (!target) throw new Error('no element at start point');
 
-        var opts = { bubbles: true, cancelable: true, view: w, clientX: x1, clientY: y1 };
+        // Mouse event clientX/clientY are relative to the VIEWPORT of
+        // the document that owns the target element. For iframe targets,
+        // that's the iframe's viewport, so we subtract iframeOffset.
+        // For top-doc targets, no offset.
+        var evOffsetX = p.iframeSelector ? -iframeOffsetX : 0;
+        var evOffsetY = p.iframeSelector ? -iframeOffsetY : 0;
+
+        var opts = { bubbles: true, cancelable: true, view: iframeWin,
+                     clientX: x1 + evOffsetX, clientY: y1 + evOffsetY };
 
         // mousedown
         target.dispatchEvent(new MouseEvent('mousedown',
@@ -658,15 +702,15 @@ window.__samwebAgent = (function() {
           if (i >= steps) {
             // Final move to exact (x2, y2) so we land on the target
             target.dispatchEvent(new MouseEvent('mousemove',
-              Object.assign({button: 0, clientX: x2, clientY: y2}, opts)));
+              Object.assign({button: 0, clientX: x2 + evOffsetX, clientY: y2 + evOffsetY}, opts)));
             // Hold at end
             setTimeout(function() {
               // mouseup
               target.dispatchEvent(new MouseEvent('mouseup',
-                Object.assign({button: 0, clientX: x2, clientY: y2}, opts)));
+                Object.assign({button: 0, clientX: x2 + evOffsetX, clientY: y2 + evOffsetY}, opts)));
               // Final click (some sliders require it)
               target.dispatchEvent(new MouseEvent('click',
-                Object.assign({button: 0, clientX: x2, clientY: y2}, opts)));
+                Object.assign({button: 0, clientX: x2 + evOffsetX, clientY: y2 + evOffsetY}, opts)));
               resolve({ ok: true, from: {x: x1, y: y1}, to: {x: x2, y: y2},
                         duration: duration, steps: steps });
             }, holdAtEnd);
@@ -677,7 +721,7 @@ window.__samwebAgent = (function() {
           var eased = t * t * (3 - 2 * t);
           var pt = bezierPoint(eased);
           target.dispatchEvent(new MouseEvent('mousemove',
-            Object.assign({button: 0, clientX: pt.x, clientY: pt.y}, opts)));
+            Object.assign({button: 0, clientX: pt.x + evOffsetX, clientY: pt.y + evOffsetY}, opts)));
           i++;
           // Inter-event delay: humans are not perfectly regular.
           var delay = (duration / steps) + (Math.random() - 0.5) * 8;

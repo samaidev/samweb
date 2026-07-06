@@ -116,6 +116,10 @@ type DragOpts struct {
         Selector2 string  `json:"selector2,omitempty"` // end element selector
         X2        float64 `json:"x2,omitempty"`
         Y2        float64 `json:"y2,omitempty"`
+        // IframeSelector, if set, makes Selector/Selector2 resolve inside
+        // this iframe (same-origin only). Used for Aliyun baxia's punish
+        // iframe (#baxia-dialog-content).
+        IframeSelector string `json:"iframeSelector,omitempty"`
         // Optional tuning (all default to randomized human-like values)
         Duration  int `json:"duration,omitempty"`  // total ms (default 800-1500)
         Steps     int `json:"steps,omitempty"`     // mousemove count (default 50-100)
