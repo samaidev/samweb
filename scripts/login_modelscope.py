@@ -131,14 +131,23 @@ def main():
     ap.add_argument("--phone", required=True,
                     help="phone number / account name to log in with")
     ap.add_argument("--password", default="",
-                    help="account password (optional; if omitted, you must "
-                         "type it in the webview window)")
+                    help="account password. Required for auto-slider — "
+                         "the baxia slider only appears after the form is "
+                         "filled AND the login button is clicked. Without "
+                         "a password the button stays disabled.")
     ap.add_argument("--login-wait", type=int, default=300,
-                    help="seconds to wait for the user to complete the "
-                         "captcha + login in the webview window")
+                    help="seconds to wait for login to complete")
     ap.add_argument("--no-save", action="store_true",
                     help="don't save cookies after successful login")
     args = ap.parse_args()
+
+    if not args.password:
+        print("ERROR: --password is required for auto-slider mode.")
+        print("       The Aliyun baxia slider only appears after the form")
+        print("       is fully filled and the login button is clicked.")
+        print("       Without a password the button stays disabled and no")
+        print("       slider is shown.")
+        return 1
 
     base = args.base.rstrip("/")
 
@@ -182,27 +191,24 @@ def main():
         print(f"    type failed: {e}")
         print("    (the form may not have rendered yet; you can type it manually)")
 
-    # 6. Auto-fill the password if provided
-    if args.password:
-        print(f"\n[5] Filling password field...")
-        try:
-            r = req(base, args.token, "POST", "/agent/type",
-                    body={"selector": "#fm-login-password", "text": args.password, "clear": True},
-                    timeout=15)
-            print(f"    typed password, ok={r.get('ok')}")
-        except Exception as e:
-            print(f"    type failed: {e}")
+    # 6. Auto-fill the password
+    print(f"\n[5] Filling password field...")
+    try:
+        r = req(base, args.token, "POST", "/agent/type",
+                body={"selector": "#fm-login-password", "text": args.password, "clear": True},
+                timeout=15)
+        print(f"    typed password, ok={r.get('ok')}")
+    except Exception as e:
+        print(f"    type failed: {e}")
 
-        # Check the agreement checkbox
-        print("\n[6] Checking agreement checkbox...")
-        try:
-            r = req(base, args.token, "POST", "/agent/click",
-                    body={"selector": "#fm-agreement-checkbox"}, timeout=10)
-            print(f"    clicked, ok={r.get('ok')}")
-        except Exception as e:
-            print(f"    click failed (may already be checked): {e}")
-    else:
-        print("\n[5] No password provided — you must type it in the webview window")
+    # Check the agreement checkbox
+    print("\n[6] Checking agreement checkbox...")
+    try:
+        r = req(base, args.token, "POST", "/agent/click",
+                body={"selector": "#fm-agreement-checkbox"}, timeout=10)
+        print(f"    clicked, ok={r.get('ok')}")
+    except Exception as e:
+        print(f"    click failed (may already be checked): {e}")
 
     # 7. Click the login button FIRST — on modelscope's passport page,
     #    the Aliyun NoCaptcha slider is hidden by default and only
