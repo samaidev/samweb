@@ -246,6 +246,11 @@ func (m *MockBackend) DragTrusted(ctx context.Context, opts TrustedDragOpts) err
         return fmt.Errorf("DragTrusted not supported on mock backend (requires CDP connection)")
 }
 
+// DragTouch is not supported on the mock backend.
+func (m *MockBackend) DragTouch(ctx context.Context, opts TrustedDragOpts) error {
+        return fmt.Errorf("DragTouch not supported on mock backend (requires CDP connection)")
+}
+
 func (m *MockBackend) Eval(ctx context.Context, script string) (json.RawMessage, error) {
         m.mu.Lock()
         defer m.mu.Unlock()

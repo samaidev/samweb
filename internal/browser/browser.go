@@ -527,9 +527,7 @@ func antiDetectionJS() string {
   //
   // event.isTrusted is a readonly getter on Event.prototype implemented
   // in C++ (not overridable via Object.defineProperty in some browsers).
-  // We use a different approach: override the Event constructor itself
-  // so that all events created via `new Event()` / `new MouseEvent()` /
-  // etc. have isTrusted hardcoded to true.
+  // We override the isTrusted property on Event.prototype.
   //
   // This runs at document_start (via webview.Init /
   // AddScriptToExecuteOnDocumentCreated), BEFORE any page JS executes,

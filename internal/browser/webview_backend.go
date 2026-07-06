@@ -414,15 +414,6 @@ func (b *WebviewBackend) SetCDPClient(c *cdp.Client) {
 }
 
 // DragTrusted injects a human-like drag via CDP's Input.dispatchMouseEvent.
-// Unlike the JS-level drag (which creates untrusted events that baxia
-// rejects), CDP events have isTrusted=true and are accepted by anti-bot
-// systems as if a real user moved the mouse.
-//
-// The coordinates are in CSS pixels relative to the page's viewport
-// (top-level page, not iframe-local). For iframe-targeted drags, the
-// caller must add the iframe's offset to the iframe-local coordinates
-// (use the agent's elements endpoint to get the iframe's
-// getBoundingClientRect).
 func (b *WebviewBackend) DragTrusted(ctx context.Context, opts agent.TrustedDragOpts) error {
         b.cdpMu.RLock()
         c := b.cdpClient
@@ -430,10 +421,32 @@ func (b *WebviewBackend) DragTrusted(ctx context.Context, opts agent.TrustedDrag
         if c == nil {
                 return fmt.Errorf("CDP client not connected — start samweb with a non-zero --cdp-port (default 9222)")
         }
-        // Run the drag in a goroutine so we can respect ctx cancellation.
         done := make(chan error, 1)
         go func() {
                 done <- c.Drag(opts.X1, opts.Y1, opts.X2, opts.Y2,
+                        opts.Duration, opts.Steps, opts.Jitter, opts.HoldAtEnd)
+        }()
+        select {
+        case err := <-done:
+                return err
+        case <-ctx.Done():
+                return ctx.Err()
+        }
+}
+
+// DragTouch injects a human-like drag via CDP's Input.dispatchTouchEvent
+// (touchStart/touchMove/touchEnd). Used for captcha sliders that listen
+// for touch events rather than mouse events.
+func (b *WebviewBackend) DragTouch(ctx context.Context, opts agent.TrustedDragOpts) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected — start samweb with a non-zero --cdp-port (default 9222)")
+        }
+        done := make(chan error, 1)
+        go func() {
+                done <- c.DragTouch(opts.X1, opts.Y1, opts.X2, opts.Y2,
                         opts.Duration, opts.Steps, opts.Jitter, opts.HoldAtEnd)
         }()
         select {

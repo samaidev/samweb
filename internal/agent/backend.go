@@ -35,6 +35,10 @@ type Backend interface {
         // error if the backend has no CDP connection (e.g. the mock
         // backend, or a real webview backend started without a CDP port).
         DragTrusted(ctx context.Context, opts TrustedDragOpts) error
+        // DragTouch is like DragTrusted but uses CDP Input.dispatchTouchEvent
+        // (touchStart/touchMove/touchEnd) instead of mouse events. Some
+        // captcha systems listen for touch events only.
+        DragTouch(ctx context.Context, opts TrustedDragOpts) error
 
         // Inspection
         Eval(ctx context.Context, script string) (json.RawMessage, error)

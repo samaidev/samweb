@@ -101,6 +101,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/key", s.handleKey)
         mux.HandleFunc("/agent/drag", s.handleDrag)
         mux.HandleFunc("/agent/drag-trusted", s.handleDragTrusted)
+        mux.HandleFunc("/agent/drag-touch", s.handleDragTouch)
 
         mux.HandleFunc("/agent/eval", s.handleEval)
         mux.HandleFunc("/agent/wait", s.handleWait)
@@ -377,26 +378,33 @@ func (s *Server) handleDrag(w http.ResponseWriter, r *http.Request) {
         writeJSON(w, http.StatusOK, OK{OK: true})
 }
 
-// handleDragTrusted dispatches a CDP-injected trusted drag. Unlike
-// /agent/drag, the events have isTrusted=true and bypass anti-bot
-// systems like Aliyun baxia. Requires the backend to have a CDP
-// connection (only the real WebviewBackend started with --cdp-port has one).
+// handleDragTrusted dispatches a CDP-injected trusted drag.
 func (s *Server) handleDragTrusted(w http.ResponseWriter, r *http.Request) {
         var opts TrustedDragOpts
         if err := readJSON(r, &opts); err != nil {
                 writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
                 return
         }
-        // TrustedDragOpts requires explicit x1,y1,x2,y2 (no selectors, because
-        // CDP coordinates are absolute page coords and the caller is expected
-        // to have resolved selectors via /agent/elements first).
-        // We accept (0,0) as a valid coordinate.
-        // Drag can take up to a few seconds (duration + holdAtEnd), but CDP
-        // WebSocket writes can be slow under load; allow up to 120s.
         ctx, cancel := ctxWithTimeout(r.Context(), 120*time.Second)
-
         defer cancel()
         if err := s.backend.DragTrusted(ctx, opts); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleDragTouch dispatches a CDP-injected touch drag (touchStart/
+// touchMove/touchEnd). Used for captchas that listen for touch events.
+func (s *Server) handleDragTouch(w http.ResponseWriter, r *http.Request) {
+        var opts TrustedDragOpts
+        if err := readJSON(r, &opts); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 120*time.Second)
+        defer cancel()
+        if err := s.backend.DragTouch(ctx, opts); err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return
         }
