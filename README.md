@@ -190,6 +190,71 @@ These are deliberate scope choices for the initial release. Pull requests welcom
 - [ ] Per-tab webview instances (true multi-tab isolation)
 - [ ] Settings UI (homepage, theme, default engine, clear-on-exit)
 - [ ] Cross-platform builds via GitHub Actions
+- [ ] **CDP / native input injection** to bypass `event.isTrusted` checks
+      on slider captchas (see "Hands-off login" section below)
+
+---
+
+## Hands-off login (the "zero human participation" workflow)
+
+SamWeb's reason for existing is to let an agent drive a browser
+without a human in the loop. For login-protected sites this means:
+log in once, then never again.
+
+### How it works
+
+SamWeb persists the proxy's cookie jar to `~/.samweb/cookies.json`
+(see `POST /agent/save-cookies` / `POST /agent/load-cookies`). On
+process start the jar is loaded automatically, so any cookies set
+during a previous successful login are immediately available.
+
+The reference script `scripts/login_modelscope.py` implements the
+full workflow:
+
+1. `POST /agent/load-cookies` — refresh the jar from disk.
+2. `POST /agent/navigate-direct` to `https://www.modelscope.cn/api/v1/users/me`
+   — if the response JSON contains `"Success":true`, the user is
+   already logged in. Exit. **This is the steady-state path: zero
+   human participation.**
+3. Otherwise: navigate-direct to the passport login URL (so the form
+   runs as the top document, no cross-origin iframe), auto-fill phone
+   + password + agreement, click login.
+4. The Aliyun baxia slider appears inside a same-origin iframe
+   (`#baxia-dialog-content`). SamWeb auto-detects the slider handle
+   and dispatches a human-like drag (cubic bezier + jitter + random
+   pauses) via `POST /agent/drag` with `iframeSelector`.
+5. If the drag passes (rare — see "Baxia limitation" below), great.
+   If not, the user drags the slider manually in the visible webview
+   window.
+6. `POST /agent/save-cookies` — persist the now-authenticated session.
+7. Every subsequent run hits step 2 and exits immediately.
+
+### Baxia slider limitation
+
+Aliyun baxia's NoCaptcha checks `event.isTrusted` on every pointer
+event. JS-created events via `dispatchEvent` always have
+`isTrusted=false` (this is a browser security invariant), so baxia
+ignores them. The drag API is implemented correctly and the trajectory
+is indistinguishable from a human's, but baxia rejects it because the
+events are untrusted.
+
+The **only** way to inject trusted events is at the browser engine
+level:
+- Chrome DevTools Protocol's `Input.dispatchMouseEvent` (what
+  Puppeteer/Playwright use under the hood)
+- WebView2's `ICoreWebView2Controller`'s native input methods
+
+`webview_go` does not expose either. Adding CDP support would require
+either:
+- Patching webview_go to expose the underlying WebView2 controller
+  (significant C++ work), or
+- Running samweb under a CDP-enabled Chromium instead of WebView2
+
+This is on the roadmap. Until then, the practical workflow is:
+**first login = one manual slider drag; all subsequent logins = fully
+automatic via cookie persistence.** For most use cases (CI jobs,
+automation scripts, daily-use browsers) this is sufficient — you log
+in once and never again.
 
 ---
 

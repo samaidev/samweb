@@ -4,27 +4,47 @@ End-to-end modelscope.cn login automation for SamWeb.
 
 Workflow:
   1. Try to load persisted cookies. If they're still valid (the user is
-     already logged in), skip login entirely.
+     already logged in), skip login entirely. ← This is the "zero human
+     participation" mode for every run after the first.
   2. Otherwise, navigate-direct to the passport.modelscope.cn login URL
      so the form runs as the top document (no cross-origin iframe).
-  3. Auto-fill the phone/account field.
-  4. Wait for the user to complete the Aliyun NoCaptcha slider and (if
-     applicable) enter the password / SMS code in the visible webview
-     window. SamWeb cannot auto-pass the slider — that requires breaking
-     Aliyun's anti-bot detection, which is out of scope.
-  5. Poll /api/v1/users/me until it returns 200 (login succeeded).
-  6. Save the cookies so the next launch skips all of this.
+  3. Auto-fill the phone/account field, password field, and check the
+     agreement checkbox.
+  4. Click the login button to trigger the Aliyun baxia slider.
+  5. Attempt to auto-drag the slider (see "Baxia slider note" below).
+     If auto-drag fails (it usually does, due to isTrusted), wait for
+     the user to complete the slider manually in the visible webview
+     window.
+  6. Poll /api/v1/users/me until it returns 200 (login succeeded).
+  7. Save the cookies so the next launch skips all of this.
 
 After the first successful login, every subsequent run of this script
 goes straight to step 1 and exits — true "zero human participation"
 operation.
+
+=== Baxia slider note ===
+
+Aliyun baxia's NoCaptcha slider verifies `event.isTrusted` on every
+pointer event. JS-created events via `dispatchEvent` always have
+`isTrusted=false`, so baxia ignores them. This is a browser security
+hard limit — the only way to inject trusted events is at the browser
+engine level (CDP Input.dispatchMouseEvent or native WebView2 calls),
+which webview_go does not expose.
+
+SamWeb's drag API still dispatches the events (in case baxia's
+detection weakens in the future, or for other captcha systems that
+don't check isTrusted), and the human-like trajectory (cubic bezier +
+jitter + smoothstep easing + random pauses) is correct. But for baxia
+specifically, the first login requires the user to drag the slider
+manually. After that, cookie persistence makes every subsequent run
+fully automatic.
 
 Usage:
   python3 scripts/login_modelscope.py \\
       --base http://127.0.0.1:7777 \\
       --token my-secret \\
       --phone 13528475138 \\
-      [--password 'your-password'] \\
+      --password 'your-password' \\
       [--login-wait 300]
 
 Requirements:
