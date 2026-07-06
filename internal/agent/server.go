@@ -107,6 +107,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/elements", s.handleElements)
         mux.HandleFunc("/agent/element", s.handleElement)
         mux.HandleFunc("/agent/screenshot", s.handleScreenshot)
+        mux.HandleFunc("/agent/screenshot-trusted", s.handleScreenshotTrusted)
         mux.HandleFunc("/agent/reset-cookies", s.handleResetCookies)
         mux.HandleFunc("/agent/save-cookies", s.handleSaveCookies)
         mux.HandleFunc("/agent/load-cookies", s.handleLoadCookies)
@@ -496,6 +497,33 @@ func (s *Server) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 
         defer cancel()
         png, err := s.backend.Screenshot(ctx, fullPage)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        w.Header().Set("Content-Type", "image/png")
+        w.Header().Set("Content-Length", strconv.Itoa(len(png)))
+        w.WriteHeader(http.StatusOK)
+        _, _ = w.Write(png)
+}
+
+// handleScreenshotTrusted takes a screenshot via CDP Page.captureScreenshot,
+// which captures the actual rendered pixels from the WebView2 compositor
+// (what the user sees). Unlike /agent/screenshot (which uses JS SVG
+// foreignObject and often fails on complex pages), this always works.
+// Requires a CDP connection (only the real WebviewBackend started with
+// --cdp-port has one).
+func (s *Server) handleScreenshotTrusted(w http.ResponseWriter, r *http.Request) {
+        fullPage := false
+        if v := r.URL.Query().Get("fullPage"); v != "" {
+                b, err := strconv.ParseBool(v)
+                if err == nil {
+                        fullPage = b
+                }
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 30*time.Second)
+        defer cancel()
+        png, err := s.backend.ScreenshotTrusted(ctx, fullPage)
         if err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return

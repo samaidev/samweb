@@ -45,6 +45,12 @@ type Backend interface {
 
         // Capture
         Screenshot(ctx context.Context, fullPage bool) ([]byte, error)
+        // ScreenshotTrusted captures the page via CDP
+        // Page.captureScreenshot. Unlike Screenshot (which uses JS SVG
+        // foreignObject and often fails on complex pages), this captures
+        // the actual rendered pixels from the WebView2 compositor — what
+        // the user sees. Requires a CDP connection.
+        ScreenshotTrusted(ctx context.Context, fullPage bool) ([]byte, error)
 
         // Session
         // ResetCookies clears all cookies in the backend's cookie jar. On the

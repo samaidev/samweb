@@ -245,6 +245,36 @@ func (b *WebviewBackend) Screenshot(ctx context.Context, fullPage bool) ([]byte,
         return b64, nil
 }
 
+// ScreenshotTrusted captures the page via CDP Page.captureScreenshot.
+// This captures the actual rendered pixels from the WebView2 compositor
+// (what the user sees), unlike Screenshot which uses JS SVG foreignObject
+// and often fails on complex pages with cross-origin iframes or large DOM.
+func (b *WebviewBackend) ScreenshotTrusted(ctx context.Context, fullPage bool) ([]byte, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil, fmt.Errorf("CDP client not connected — start samweb with a non-zero --cdp-port (default 9222)")
+        }
+        done := make(chan struct {
+                data []byte
+                err  error
+        }, 1)
+        go func() {
+                data, err := c.Screenshot(fullPage)
+                done <- struct {
+                        data []byte
+                        err  error
+                }{data, err}
+        }()
+        select {
+        case r := <-done:
+                return r.data, r.err
+        case <-ctx.Done():
+                return nil, ctx.Err()
+        }
+}
+
 func (b *WebviewBackend) Close() error { return nil }
 
 // ResetCookies clears the proxy's shared cookie jar so the next navigation

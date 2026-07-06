@@ -9,6 +9,7 @@
 package cdp
 
 import (
+        "encoding/base64"
         "encoding/json"
         "fmt"
         "log"
@@ -96,16 +97,47 @@ func ConnectToPage(port int) (*Client, error) {
         return Connect(t.WebSocketDebuggerURL)
 }
 
-// Close closes the underlying WebSocket.
-func (c *Client) Close() error {
-        c.mu.Lock()
-        defer c.mu.Unlock()
-        if c.conn == nil {
-                return nil
+// Screenshot takes a PNG screenshot via CDP Page.captureScreenshot.
+// Returns the base64-encoded PNG data (CDP returns base64, not raw
+// bytes). The caller should base64-decode it.
+//
+// Unlike the JS-level screenshot (which uses SVG foreignObject and
+// often fails on complex pages), this captures the actual rendered
+// pixels from the WebView2 compositor — what the user sees.
+func (c *Client) Screenshot(fullPage bool) ([]byte, error) {
+        params := map[string]interface{}{
+                "format":      "png",
+                "fromSurface": true,
         }
-        err := c.conn.Close()
-        c.conn = nil
-        return err
+        if fullPage {
+                // Capture the full scrollable page, not just the viewport.
+                params["clip"] = map[string]interface{}{
+                        "x":      0,
+                        "y":      0,
+                        "width":  1280,
+                        "height": 8000,
+                        "scale":  1,
+                }
+        }
+        resp, err := c.send("Page.captureScreenshot", params)
+        if err != nil {
+                return nil, err
+        }
+        var result struct {
+                Data string `json:"data"` // base64-encoded PNG
+        }
+        if err := json.Unmarshal(resp, &result); err != nil {
+                return nil, fmt.Errorf("cdp: decode screenshot response: %w", err)
+        }
+        if result.Data == "" {
+                return nil, fmt.Errorf("cdp: screenshot returned empty data")
+        }
+        // base64-decode
+        decoded, err := base64.StdEncoding.DecodeString(result.Data)
+        if err != nil {
+                return nil, fmt.Errorf("cdp: base64-decode screenshot: %w", err)
+        }
+        return decoded, nil
 }
 
 // readLoop reads CDP responses and matches them to pending requests by ID.

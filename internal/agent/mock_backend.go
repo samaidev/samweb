@@ -327,6 +327,11 @@ func (m *MockBackend) State(ctx context.Context) (*State, error) {
         }, nil
 }
 
+// ScreenshotTrusted is not supported on the mock backend (no CDP).
+func (m *MockBackend) ScreenshotTrusted(ctx context.Context, fullPage bool) ([]byte, error) {
+        return nil, fmt.Errorf("ScreenshotTrusted not supported on mock backend (requires CDP connection)")
+}
+
 func (m *MockBackend) Screenshot(ctx context.Context, fullPage bool) ([]byte, error) {
         m.mu.Lock()
         defer m.mu.Unlock()
