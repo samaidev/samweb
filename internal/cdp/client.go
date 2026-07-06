@@ -14,6 +14,7 @@ import (
         "fmt"
         "log"
         "net/http"
+        "strings"
         "sync"
         "sync/atomic"
         "time"
@@ -100,6 +101,106 @@ func ConnectToPage(port int) (*Client, error) {
                 return nil, err
         }
         return Connect(t.WebSocketDebuggerURL)
+}
+
+// FindIframeTarget finds a target of type "iframe" on the given port.
+// Returns the first iframe target, or nil if none found.
+func FindIframeTarget(port int) (*PageTarget, error) {
+        resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/json", port))
+        if err != nil {
+                return nil, fmt.Errorf("cdp: cannot reach /json on port %d: %w", port, err)
+        }
+        defer resp.Body.Close()
+        var targets []PageTarget
+        if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
+                return nil, fmt.Errorf("cdp: decode /json response: %w", err)
+        }
+        for i := range targets {
+                // iframe targets have type "iframe" in newer Chromium, or
+                // type "other" with a URL that looks like a punish/captcha page
+                t := targets[i]
+                if t.Type == "iframe" && t.WebSocketDebuggerURL != "" {
+                        return &t, nil
+                }
+        }
+        // Fallback: look for any target whose URL contains "punish" or
+        // "baxia" (the baxia captcha iframe)
+        for i := range targets {
+                t := targets[i]
+                if t.WebSocketDebuggerURL != "" && (strings.Contains(t.URL, "punish") || strings.Contains(t.URL, "baxia")) {
+                        return &t, nil
+                }
+        }
+        return nil, fmt.Errorf("cdp: no iframe target found on port %d", port)
+}
+
+// ConnectToIframe finds and connects to the baxia iframe's CDP target.
+// This is separate from the page-level CDP connection. Events dispatched
+// from this connection go directly to the iframe's document, bypassing
+// the top-level page's event routing.
+func ConnectToIframe(port int) (*Client, error) {
+        t, err := FindIframeTarget(port)
+        if err != nil {
+                return nil, err
+        }
+        return Connect(t.WebSocketDebuggerURL)
+}
+
+// AttachToTarget uses CDP Target.attachToTarget to attach to a specific
+// target (e.g. an iframe) by target ID. Returns the session ID needed
+// for subsequent commands on that target.
+//
+// This is the "flat session" approach: we send commands with a
+// sessionId field, and CDP routes them to the iframe's context.
+func (c *Client) AttachToTarget(targetID string) (string, error) {
+        resp, err := c.send("Target.attachToTarget", map[string]interface{}{
+                "targetId":  targetID,
+                "flatten":   true,
+        })
+        if err != nil {
+                return "", err
+        }
+        var result struct {
+                SessionID string `json:"sessionId"`
+        }
+        if err := json.Unmarshal(resp, &result); err != nil {
+                return "", fmt.Errorf("cdp: decode attachToTarget response: %w", err)
+        }
+        return result.SessionID, nil
+}
+
+// GetTargets returns all targets via CDP Target.getTargets.
+func (c *Client) GetTargets() ([]PageTarget, error) {
+        resp, err := c.send("Target.getTargets", nil)
+        if err != nil {
+                return nil, err
+        }
+        var result struct {
+                TargetInfos []struct {
+                        TargetID         string `json:"targetId"`
+                        Type             string `json:"type"`
+                        Title            string `json:"title"`
+                        URL              string `json:"url"`
+                        Attached         bool   `json:"attached"`
+                        OpenerID         string `json:"openerId"`
+                        CanAccessOpener  bool   `json:"canAccessOpener"`
+                        OpenerFrameID    string `json:"openerFrameId"`
+                } `json:"targetInfos"`
+        }
+        if err := json.Unmarshal(resp, &result); err != nil {
+                return nil, fmt.Errorf("cdp: decode getTargets response: %w", err)
+        }
+        out := make([]PageTarget, len(result.TargetInfos))
+        for i, t := range result.TargetInfos {
+                out[i] = PageTarget{
+                        ID:               t.TargetID,
+                        Type:             t.Type,
+                        Title:            t.Title,
+                        URL:              t.URL,
+                        WebSocketDebuggerURL: "", // Target.getTargets doesn't return ws URL
+                }
+        }
+        return out, nil
 }
 
 // GetAllCookies returns all cookies from the browser's cookie store via
@@ -317,14 +418,15 @@ func (c *Client) readLoop() {
                         return
                 }
                 var msg struct {
-                        ID     int64           `json:"id"`
-                        Result json.RawMessage `json:"result"`
-                        Error  *struct {
+                        ID        int64           `json:"id"`
+                        Result    json.RawMessage `json:"result"`
+                        Error     *struct {
                                 Code    int    `json:"code"`
                                 Message string `json:"message"`
                         } `json:"error,omitempty"`
-                        Method string          `json:"method,omitempty"` // for events
-                        Params json.RawMessage `json:"params,omitempty"`
+                        Method   string          `json:"method,omitempty"` // for events
+                        Params   json.RawMessage `json:"params,omitempty"`
+                        SessionID string         `json:"sessionId,omitempty"` // flat session
                 }
                 if err := json.Unmarshal(data, &msg); err != nil {
                         continue
@@ -418,4 +520,65 @@ func (c *Client) sendAsync(method string, params interface{}) error {
                 return fmt.Errorf("cdp: write: %w", err)
         }
         return nil
+}
+
+// sendWithSession sends a CDP command to a specific session (e.g. an
+// iframe target attached via Target.attachToTarget). The sessionId
+// field routes the command to that target's context.
+func (c *Client) sendWithSession(method string, params interface{}, sessionID string) (json.RawMessage, error) {
+        id := c.nextID.Add(1)
+        ch := make(chan cdpResponse, 1)
+        c.mu.Lock()
+        if c.conn == nil {
+                c.mu.Unlock()
+                return nil, fmt.Errorf("cdp: not connected")
+        }
+        c.pending[id] = ch
+        payload := struct {
+                ID        int64       `json:"id"`
+                Method    string      `json:"method"`
+                Params    interface{} `json:"params,omitempty"`
+                SessionID string      `json:"sessionId,omitempty"`
+        }{
+                ID:        id,
+                Method:    method,
+                Params:    params,
+                SessionID: sessionID,
+        }
+        if err := c.conn.WriteJSON(payload); err != nil {
+                delete(c.pending, id)
+                c.mu.Unlock()
+                return nil, fmt.Errorf("cdp: write: %w", err)
+        }
+        c.mu.Unlock()
+
+        select {
+        case r := <-ch:
+                return r.result, r.err
+        case <-time.After(10 * time.Second):
+                c.mu.Lock()
+                delete(c.pending, id)
+                c.mu.Unlock()
+                return nil, fmt.Errorf("cdp: timeout waiting for %s (session %s) response", method, sessionID)
+        }
+}
+
+// DispatchRawSession sends a single CDP mouse event to a specific
+// session (e.g. iframe target). This is the key method for baxia:
+// by dispatching mouseup from the iframe's own session, the event
+// routes directly to the iframe's document — same path as mousedown.
+func (c *Client) DispatchRawSession(opts RawMouseOpts, sessionID string) error {
+        params := dispatchMouseParams{
+                Type:       MouseEventType(opts.Type),
+                X:          opts.X,
+                Y:          opts.Y,
+                Button:     MouseButton(opts.Button),
+                Buttons:    opts.Buttons,
+                ClickCount: opts.ClickCount,
+        }
+        if opts.Timestamp > 0 {
+                params.Timestamp = opts.Timestamp
+        }
+        _, err := c.sendWithSession("Input.dispatchMouseEvent", params, sessionID)
+        return err
 }
