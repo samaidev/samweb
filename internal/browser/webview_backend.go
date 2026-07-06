@@ -104,6 +104,12 @@ func (b *WebviewBackend) dispatch(ctx context.Context, method string, params int
         log.Printf("[backend] dispatch id=%s method=%s -> Eval", id, method)
         b.w.Eval(js)
         log.Printf("[backend] dispatch id=%s method=%s Eval returned", id, method)
+        // Diagnostic: also send a direct ping to __agentCallback to test if
+        // the Bind mechanism works independently of __samwebAgent. If
+        // handleCallback receives "ping-<id>", we know Eval + Bind work and
+        // the problem is __samwebAgent; if not, Eval or Bind is broken.
+        pingJS := fmt.Sprintf(`try { window.__agentCallback("ping-%s", "pong", ""); } catch(e) {}`, id)
+        b.w.Eval(pingJS)
 
         select {
         case r := <-ch:
