@@ -5,6 +5,7 @@ import (
         "encoding/json"
         "errors"
         "fmt"
+        "log"
         "sync"
         "time"
 
@@ -52,6 +53,7 @@ func NewWebviewBackend(w webview.WebView) *WebviewBackend {
 // handleCallback is the Go-side receiver for JS results. It is invoked by
 // the webview binding whenever the JS side calls window.__agentCallback(id, result, err).
 func (b *WebviewBackend) handleCallback(id, result, err string) {
+        log.Printf("[backend] handleCallback id=%s result_len=%d err=%q", id, len(result), err)
         b.mu.Lock()
         ch, ok := b.pend[id]
         if ok {
@@ -59,6 +61,7 @@ func (b *WebviewBackend) handleCallback(id, result, err string) {
         }
         b.mu.Unlock()
         if !ok {
+                log.Printf("[backend] handleCallback: no pending request for id=%s (orphan callback)", id)
                 return
         }
         ch <- callbackResult{result: result, err: err}
@@ -98,7 +101,9 @@ func (b *WebviewBackend) dispatch(ctx context.Context, method string, params int
     window.__agentCallback(%q, '', 'dispatch error: ' + (e && e.message ? e.message : String(e)));
   }
 })();`, id, id, method, paramsJSON, id)
+        log.Printf("[backend] dispatch id=%s method=%s -> Eval", id, method)
         b.w.Eval(js)
+        log.Printf("[backend] dispatch id=%s method=%s Eval returned", id, method)
 
         select {
         case r := <-ch:
