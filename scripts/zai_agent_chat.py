@@ -130,56 +130,62 @@ def navigate_to_home(a):
 
 
 def expand_sidebar(a):
-    """Click the sidebar toggle button to expand it."""
+    """Click the sidebar toggle button to expand it.
+
+    Uses JS click() instead of CDP coordinates because the toggle button
+    can be at negative x (off-screen) when the sidebar is collapsed in
+    a narrow window.
+    """
     print("\n=== Expanding sidebar ===")
-    # The sidebar toggle is an SVG with class "rotate-180"
     script = r"""(function(){
         var svgs = document.querySelectorAll('svg.rotate-180, svg[class*="rotate-180"]');
         for (var i = 0; i < svgs.length; i++) {
-            var r = svgs[i].getBoundingClientRect();
+            var svg = svgs[i];
+            var r = svg.getBoundingClientRect();
             if (r.width > 0 && r.height > 0) {
-                return JSON.stringify({cx: Math.round(r.left + r.width/2), cy: Math.round(r.top + r.height/2)});
+                var el = svg;
+                while (el && el !== document.body) {
+                    if (el.tagName === 'BUTTON') {
+                        el.click();
+                        return JSON.stringify({ok: true, tag: el.tagName});
+                    }
+                    el = el.parentElement;
+                }
+                svg.click();
+                return JSON.stringify({ok: true, fallback: 'svg'});
             }
         }
-        return JSON.stringify({error: 'no toggle found'});
+        return JSON.stringify({ok: false, error: 'no toggle'});
     })()"""
     _, v = a.eval(script)
     info = unwrap(v)
-    if info.get("cx") is not None:
-        cdp_click(a, info["cx"], info["cy"])
-        print(f"  clicked sidebar toggle at ({info['cx']},{info['cy']})")
-        time.sleep(2)
-        return True
-    print("  ⚠ sidebar toggle not found (may already be expanded)")
-    return False
+    print(f"  result: {info}")
+    time.sleep(2)
+    return info.get("ok", False)
 
 
 def switch_to_agent_mode(a):
-    """Click the 'Agent 模式' button in the sidebar."""
+    """Click the 'Agent 模式' button in the sidebar (via JS click)."""
     print("\n=== Switching to Agent 模式 ===")
     script = r"""(function(){
         var btns = document.querySelectorAll('button');
         for (var i = 0; i < btns.length; i++) {
             var b = btns[i];
-            var t = (b.innerText || '').trim();
-            if (t === 'Agent 模式') {
+            if ((b.innerText || '').trim() === 'Agent 模式') {
                 var r = b.getBoundingClientRect();
                 if (r.width > 0 && r.height > 0) {
-                    return JSON.stringify({cx: Math.round(r.left + r.width/2), cy: Math.round(r.top + r.height/2)});
+                    b.click();
+                    return JSON.stringify({ok: true});
                 }
             }
         }
-        return JSON.stringify({error: 'Agent mode button not found'});
+        return JSON.stringify({ok: false, error: 'not found'});
     })()"""
     _, v = a.eval(script)
     info = unwrap(v)
-    if info.get("cx") is not None:
-        cdp_click(a, info["cx"], info["cy"])
-        print(f"  clicked 'Agent 模式' at ({info['cx']},{info['cy']})")
-        time.sleep(2)
-        return True
-    print("  ⚠ Agent 模式 button not found")
-    return False
+    print(f"  result: {info}")
+    time.sleep(2)
+    return info.get("ok", False)
 
 
 def switch_model(a, model_name):
@@ -260,41 +266,25 @@ def type_message(a, message):
 
 
 def send_message(a):
-    """Click the send button (button.sendMessageButton)."""
+    """Click the send button via JS click (more reliable than CDP coords)."""
     print("\n=== Sending message ===")
     # Focus the textarea first
-    script_focus = r"""(function(){
-        var ta = document.getElementById('chat-input');
-        if (ta) { ta.focus(); return 'focused'; }
-        return 'not found';
-    })()"""
-    a.eval(script_focus)
+    a.eval(r"""(function(){var ta=document.getElementById('chat-input');if(ta)ta.focus();return 'ok';})()""")
     time.sleep(0.3)
 
-    # Find and click the send button
+    # JS click the send button
     script = r"""(function(){
         var btn = document.querySelector('button.sendMessageButton, button[class*="sendMessageButton"]');
         if (!btn) return JSON.stringify({error: 'no send button'});
-        var r = btn.getBoundingClientRect();
-        return JSON.stringify({
-            cx: Math.round(r.left + r.width/2),
-            cy: Math.round(r.top + r.height/2),
-            disabled: btn.disabled
-        });
+        if (btn.disabled) return JSON.stringify({error: 'disabled'});
+        btn.click();
+        return JSON.stringify({ok: true});
     })()"""
     _, v = a.eval(script)
     info = unwrap(v)
-    if info.get("cx") is None:
-        print(f"  ⚠ {info.get('error')}")
-        return False
-    if info.get("disabled"):
-        print("  ⚠ send button is disabled")
-        return False
-
-    cdp_click(a, info["cx"], info["cy"])
-    print(f"  clicked send button at ({info['cx']},{info['cy']})")
-    time.sleep(2)
-    return True
+    print(f"  result: {info}")
+    time.sleep(3)
+    return info.get("ok", False)
 
 
 def get_response(a, max_wait=60, stable_count=3):
@@ -318,7 +308,11 @@ def get_response(a, max_wait=60, stable_count=3):
                 userText.push((userMsgs[i].innerText || '').trim());
             }
             for (var i = 0; i < asstMsgs.length; i++) {
-                asstText.push((asstMsgs[i].innerText || '').trim());
+                // Get the full text but strip "思考过程" / "正在思考" / "跳过" UI labels
+                var t = (asstMsgs[i].innerText || '').trim();
+                // Remove thinking-chain UI text
+                t = t.replace(/^正在思考\s*跳过\s*/, '').replace(/^思考过程\s*/, '');
+                asstText.push(t);
             }
             return JSON.stringify({
                 user_count: userMsgs.length,
