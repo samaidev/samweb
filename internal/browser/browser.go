@@ -208,30 +208,22 @@ func Run(opts Options) error {
                 }()
         }
 
-        // Get the native window handle BEFORE starting w.Run() (which blocks).
-        // w.Window() is safe to call here because the webview was created by
-        // webview.New above and the window handle is set during construction.
-        nativeHwnd := w.Window()
-
-        // Start a goroutine that periodically forces input focus to the webview
-        // window. This works around a webview_go / WebView2 issue where mouse
-        // click events are not delivered to the WebView2 rendering engine when
-        // the window is activated programmatically (e.g. via schtasks in an
-        // RDP session).
-        if nativeHwnd != nil {
-                hwndPtr := uintptr(nativeHwnd)
-                go func() {
-                        // Wait a bit for the window to be fully shown.
-                        time.Sleep(3 * time.Second)
-                        log.Printf("[browser] force-focus: started, hwnd=0x%x", hwndPtr)
-                        for {
-                                time.Sleep(2 * time.Second)
-                                forceFocusToWindow(hwndPtr)
-                        }
-                }()
-        } else {
-                log.Printf("[browser] force-focus: no window handle available")
-        }
+        // TEMPORARILY DISABLED: force-focus goroutine causes samweb to not
+        // start when launched via schtasks. The syscall calls may be
+        // interfering with the webview message loop. Will re-enable with
+        // a different approach (e.g. via webview.Eval to call JS focus()).
+        //
+        // nativeHwnd := w.Window()
+        // if nativeHwnd != nil {
+        //         hwndPtr := uintptr(nativeHwnd)
+        //         go func() {
+        //                 time.Sleep(3 * time.Second)
+        //                 for {
+        //                         time.Sleep(2 * time.Second)
+        //                         forceFocusToWindow(hwndPtr)
+        //                 }
+        //         }()
+        // }
 
         w.Run()
 
