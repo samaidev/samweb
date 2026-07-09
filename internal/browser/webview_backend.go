@@ -345,6 +345,128 @@ func (b *WebviewBackend) ResetCookies(ctx context.Context) error {
         return nil
 }
 
+// ----------------------------- Profile management -----------------------------
+//
+// Profiles let the user save the current browser cookies under a name
+// (e.g. "z.ai account A", "z.ai account B") and switch between them.
+// This enables running multiple accounts on the same site simultaneously
+// in a single samweb instance — switch profile, log in, switch back, etc.
+//
+// All profile operations work on the CDP cookie store (where
+// navigate-direct cookies live). The proxy jar is also cleared on
+// switch so the two stay in sync.
+
+// SaveCurrentCookiesToProfile creates or updates a profile with the
+// current browser cookies. If a profile with the given name already
+// exists, its cookies are replaced; otherwise a new profile is created.
+func (b *WebviewBackend) SaveCurrentCookiesToProfile(ctx context.Context, name string) (agent.ProfileInfo, error) {
+        cookies, err := b.snapshotCDPCookies()
+        if err != nil {
+                return agent.ProfileInfo{}, err
+        }
+        prof, err := Profiles().Create(name, cookies)
+        if err != nil {
+                return agent.ProfileInfo{}, err
+        }
+        return toProfileInfo(prof), nil
+}
+
+// ListProfiles returns all saved profiles plus the active profile ID.
+func (b *WebviewBackend) ListProfiles(ctx context.Context) ([]agent.ProfileInfo, string, error) {
+        profs, activeID, err := Profiles().List()
+        if err != nil {
+                return nil, "", err
+        }
+        out := make([]agent.ProfileInfo, len(profs))
+        for i, p := range profs {
+                out[i] = toProfileInfo(p)
+        }
+        return out, activeID, nil
+}
+
+// RenameProfile changes the user-visible name of a profile.
+func (b *WebviewBackend) RenameProfile(ctx context.Context, id, newName string) error {
+        return Profiles().Rename(id, newName)
+}
+
+// DeleteProfile removes a profile. If it was the active profile, the
+// active profile is cleared (no profile selected).
+func (b *WebviewBackend) DeleteProfile(ctx context.Context, id string) error {
+        return Profiles().Delete(id)
+}
+
+// SwitchToProfile clears the current browser cookies and loads the
+// cookies from the named profile. After switching, the profile is
+// marked as active. The caller (UI) is responsible for reloading the
+// current page so the new cookies take effect.
+//
+// If id is empty, the active profile is cleared and the current cookies
+// are kept as-is (i.e. switch to "no profile").
+func (b *WebviewBackend) SwitchToProfile(ctx context.Context, id string) error {
+        // Mark active first (even if cookie load fails, the user's intent
+        // is recorded).
+        if err := Profiles().Activate(id); err != nil {
+                return err
+        }
+
+        if id == "" {
+                // "No profile" — don't touch cookies, just clear the active marker.
+                return nil
+        }
+
+        prof, ok, err := Profiles().Get(id)
+        if err != nil {
+                return err
+        }
+        if !ok {
+                return fmt.Errorf("profile not found: %s", id)
+        }
+
+        // Clear current cookies (both proxy jar and CDP store).
+        if err := b.ResetCookies(ctx); err != nil {
+                return fmt.Errorf("reset cookies: %w", err)
+        }
+
+        // Load profile's cookies into the CDP browser store.
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected — start samweb with a non-zero --cdp-port (default 9222)")
+        }
+        for _, ck := range prof.Cookies {
+                if err := c.SetCookie(ck); err != nil {
+                        // non-fatal — one bad cookie shouldn't fail the whole switch
+                        _ = err
+                }
+        }
+        return nil
+}
+
+// snapshotCDPCookies returns a copy of all cookies currently in the
+// CDP browser cookie store.
+func (b *WebviewBackend) snapshotCDPCookies() ([]cdp.CDPCookie, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil, fmt.Errorf("CDP client not connected — start samweb with a non-zero --cdp-port (default 9222)")
+        }
+        return c.GetAllCookies()
+}
+
+// toProfileInfo converts the internal Profile type to the agent-layer
+// ProfileInfo DTO (which is what the HTTP API and UI see).
+func toProfileInfo(p Profile) agent.ProfileInfo {
+        return agent.ProfileInfo{
+                ID:           p.ID,
+                Name:         p.Name,
+                CookieCount:  len(p.Cookies),
+                Created:      p.Created,
+                Updated:      p.Updated,
+        }
+}
+
 // SaveCookies persists BOTH the proxy cookie jar AND the CDP browser
 // cookie store to disk. The CDP cookies are saved to a separate file
 // (~/.samweb/cdp-cookies.json) and restored on next process start via

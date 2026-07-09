@@ -228,3 +228,15 @@ type BrowserCookie struct {
         Session  bool    `json:"session"`
         SameSite string  `json:"sameSite"`
 }
+
+// ProfileInfo is the DTO for a saved cookie profile (used by the UI to
+// display the profile list and select the active one). The actual cookie
+// values are not exposed via this struct — they live in the backend's
+// profile store and are only loaded into the browser on SwitchToProfile.
+type ProfileInfo struct {
+        ID          string `json:"id"`
+        Name        string `json:"name"`
+        CookieCount int    `json:"cookie_count"`
+        Created     int64  `json:"created"` // unix seconds
+        Updated     int64  `json:"updated"` // unix seconds
+}

@@ -22,8 +22,11 @@ import (
         "log"
         "net"
         "net/http"
+        "net/http/httputil"
+        "net/url"
         "os"
         "runtime"
+        "strings"
         "sync"
         "time"
 
@@ -109,7 +112,7 @@ func Run(opts Options) error {
                 }
         }
 
-        uiSrv := newUIServer(uiPort, engine)
+        uiSrv := newUIServer(uiPort, engine, opts.AgentAddr)
 
         var wg sync.WaitGroup
         errCh := make(chan error, 4)
@@ -237,12 +240,13 @@ func gracefulCtx() context.Context {
 // uiServer is the HTTP server that serves the embedded UI assets, the
 // local API used by the frontend, and the proxy that fetches remote pages.
 type uiServer struct {
-        port   int
-        engine search.Engine
+        port      int
+        engine    search.Engine
+        agentAddr string // host:port of the agent HTTP server (for reverse proxy)
 }
 
-func newUIServer(port int, engine search.Engine) *uiServer {
-        return &uiServer{port: port, engine: engine}
+func newUIServer(port int, engine search.Engine, agentAddr string) *uiServer {
+        return &uiServer{port: port, engine: engine, agentAddr: agentAddr}
 }
 
 func (s *uiServer) handler() http.Handler {
@@ -294,6 +298,23 @@ func (s *uiServer) handler() http.Handler {
         }
         mux.HandleFunc("/proxy", proxyHandler)
 
+        // Reverse-proxy /agent/* to the agent HTTP server (which runs on a
+        // separate port, default 7777). This lets the UI's JS call the agent
+        // API via same-origin fetch (e.g. fetch('/agent/profiles')) instead
+        // of having to know the agent port. Used by the profile management UI.
+        if s.agentAddr != "" {
+                agentTarget := "http://" + s.agentAddr
+                agentProxy := httputil.NewSingleHostReverseProxy(mustParseURL(agentTarget))
+                // Preserve the original Host header so any agent-side Host-based
+                // routing still works.
+                originalDirector := agentProxy.Director
+                agentProxy.Director = func(req *http.Request) {
+                        originalDirector(req)
+                        req.Host = s.agentAddr
+                }
+                mux.Handle("/agent/", agentProxy)
+        }
+
         // Serve embedded UI files from the "ui" subdirectory, stripping the
         // "ui/" prefix so that the SPA index.html is served at "/".
         sub, err := fs.Sub(uiFS, "ui")
@@ -303,6 +324,21 @@ func (s *uiServer) handler() http.Handler {
         mux.Handle("/", http.FileServer(http.FS(sub)))
 
         return mux
+}
+
+// mustParseURL parses a URL string, panicking on error. Used for the
+// agent reverse proxy where the address is always valid (it comes from
+// Options.AgentAddr which defaults to "0.0.0.0:7777").
+func mustParseURL(s string) *url.URL {
+        // agentAddr is host:port without scheme; add http:// prefix.
+        if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+                s = "http://" + s
+        }
+        u, err := url.Parse(s)
+        if err != nil {
+                log.Fatalf("[browser] invalid agent address %q: %v", s, err)
+        }
+        return u
 }
 
 // antiDetectionJS returns a JS snippet that masks the most common signals

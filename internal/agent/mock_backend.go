@@ -391,6 +391,32 @@ func (m *MockBackend) Screenshot(ctx context.Context, fullPage bool) ([]byte, er
 
 func (m *MockBackend) Close() error { return nil }
 
+// ----------------------------- Profiles (mock stubs) -----------------------------
+//
+// The mock backend does not persist cookies, so profile operations are
+// no-ops or return empty results. They exist only so the mock satisfies
+// the Backend interface.
+
+func (m *MockBackend) SaveCurrentCookiesToProfile(ctx context.Context, name string) (ProfileInfo, error) {
+        return ProfileInfo{ID: "mock", Name: name, CookieCount: 0, Created: 0, Updated: 0}, nil
+}
+
+func (m *MockBackend) ListProfiles(ctx context.Context) ([]ProfileInfo, string, error) {
+        return []ProfileInfo{}, "", nil
+}
+
+func (m *MockBackend) RenameProfile(ctx context.Context, id, newName string) error {
+        return nil
+}
+
+func (m *MockBackend) DeleteProfile(ctx context.Context, id string) error {
+        return nil
+}
+
+func (m *MockBackend) SwitchToProfile(ctx context.Context, id string) error {
+        return nil
+}
+
 // ----------------------------- helpers -----------------------------
 
 func (m *MockBackend) findBySelectorLocked(selector string) *mockEl {

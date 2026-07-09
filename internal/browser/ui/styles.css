@@ -309,3 +309,132 @@ body {
   font-size: 13px;
 }
 .popover-action:hover { background: #f8f9fa; }
+
+/* ===================== Profile selector ===================== */
+.profile-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 6px 0 10px;
+  background: #f1f3f4;
+  border-radius: 16px;
+  border: 1px solid transparent;
+  transition: background-color 120ms ease, border-color 120ms ease;
+  flex-shrink: 0;
+  max-width: 240px;
+}
+.profile-wrap:hover { background: #e8eaed; }
+.profile-wrap:focus-within {
+  background: #ffffff;
+  border-color: #dadce0;
+}
+
+.profile-select {
+  flex: 1;
+  min-width: 80px;
+  max-width: 180px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 12px;
+  color: #202124;
+  height: 100%;
+  cursor: pointer;
+  user-select: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  padding-right: 4px;
+}
+.profile-select option {
+  background: #ffffff;
+  color: #202124;
+}
+
+.profile-action {
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: #5f6368;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+}
+.profile-action:hover { background: rgba(0,0,0,0.08); color: #202124; }
+
+/* Profile popover */
+.profile-create-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #e8eaed;
+}
+.profile-create-row input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #dadce0;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  user-select: text;
+}
+.profile-create-row input:focus { border-color: #1a73e8; }
+.profile-create-row .popover-action {
+  margin-top: 0;
+  width: auto;
+  padding: 6px 12px;
+  white-space: nowrap;
+}
+.profile-list .profile-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #202124;
+  font-size: 13px;
+  gap: 8px;
+}
+.profile-list .profile-item:hover { background: #f1f3f4; }
+.profile-list .profile-item.active { background: #e8f0fe; color: #1a73e8; }
+.profile-list .profile-item .profile-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.profile-list .profile-item .profile-meta {
+  font-size: 11px;
+  color: #80868b;
+  white-space: nowrap;
+}
+.profile-list .profile-item .profile-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.profile-list .profile-item .profile-rename,
+.profile-list .profile-item .profile-delete {
+  width: 22px; height: 22px;
+  border: none; background: transparent;
+  border-radius: 50%; cursor: pointer;
+  color: #5f6368;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+}
+.profile-list .profile-item .profile-rename:hover,
+.profile-list .profile-item .profile-delete:hover { background: rgba(0,0,0,0.08); color: #202124; }
+.profile-list .empty {
+  padding: 16px 10px;
+  color: #80868b;
+  font-size: 13px;
+  text-align: center;
+}

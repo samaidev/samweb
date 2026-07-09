@@ -94,6 +94,33 @@ type Backend interface {
         // or after manually editing the cookie file.
         LoadCookies(ctx context.Context) error
 
+        // ----------------------------- Profiles -----------------------------
+        //
+        // Profiles are named cookie snapshots that allow the user to switch
+        // between multiple accounts on the same site (e.g. z.ai) within a
+        // single samweb instance. See internal/browser/profiles.go for the
+        // on-disk format and in-memory store.
+
+        // SaveCurrentCookiesToProfile creates or updates a profile with the
+        // current browser cookies. If a profile with the given name already
+        // exists, its cookies are replaced; otherwise a new profile is created.
+        SaveCurrentCookiesToProfile(ctx context.Context, name string) (ProfileInfo, error)
+
+        // ListProfiles returns all saved profiles plus the active profile ID.
+        ListProfiles(ctx context.Context) ([]ProfileInfo, string, error)
+
+        // RenameProfile changes the user-visible name of a profile.
+        RenameProfile(ctx context.Context, id, newName string) error
+
+        // DeleteProfile removes a profile. If it was the active profile, the
+        // active profile is cleared.
+        DeleteProfile(ctx context.Context, id string) error
+
+        // SwitchToProfile clears the current browser cookies and loads the
+        // cookies from the named profile. Pass an empty id to clear the
+        // active profile (cookies are kept as-is).
+        SwitchToProfile(ctx context.Context, id string) error
+
         // Lifecycle
         Close() error
 }

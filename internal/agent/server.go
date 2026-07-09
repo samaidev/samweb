@@ -119,6 +119,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/reset-cookies", s.handleResetCookies)
         mux.HandleFunc("/agent/save-cookies", s.handleSaveCookies)
         mux.HandleFunc("/agent/load-cookies", s.handleLoadCookies)
+
+        // Profile management (multi-account cookie profiles)
+        mux.HandleFunc("/agent/profiles", s.handleProfiles)          // GET = list, POST = create
+        mux.HandleFunc("/agent/profiles/switch", s.handleProfileSwitch) // POST {id}
+        mux.HandleFunc("/agent/profiles/rename", s.handleProfileRename) // POST {id, name}
+        mux.HandleFunc("/agent/profiles/delete", s.handleProfileDelete) // POST {id}
 }
 
 // ----------------------------- helpers -----------------------------
@@ -764,6 +770,148 @@ func (s *Server) handleLoadCookies(w http.ResponseWriter, r *http.Request) {
         ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
         defer cancel()
         if err := s.backend.LoadCookies(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// ----------------------------- Profile handlers -----------------------------
+//
+// Profiles are named cookie snapshots that allow the user to switch
+// between multiple accounts on the same site (e.g. z.ai) within a
+// single samweb instance.
+
+// handleProfiles handles:
+//   GET  /agent/profiles              → list all profiles + active ID
+//   POST /agent/profiles              → create/update a profile with current cookies
+//                                       body: {"name": "z.ai account A"}
+func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
+        switch r.Method {
+        case http.MethodGet:
+                ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+                defer cancel()
+                profiles, activeID, err := s.backend.ListProfiles(ctx)
+                if err != nil {
+                        writeError(w, http.StatusInternalServerError, err.Error())
+                        return
+                }
+                writeJSON(w, http.StatusOK, map[string]interface{}{
+                        "profiles":         profiles,
+                        "active_profile_id": activeID,
+                        "count":            len(profiles),
+                })
+
+        case http.MethodPost:
+                var body struct {
+                        Name string `json:"name"`
+                }
+                if err := readJSON(r, &body); err != nil {
+                        writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                        return
+                }
+                if body.Name == "" {
+                        writeError(w, http.StatusBadRequest, "name is required")
+                        return
+                }
+                ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+                defer cancel()
+                prof, err := s.backend.SaveCurrentCookiesToProfile(ctx, body.Name)
+                if err != nil {
+                        writeError(w, http.StatusInternalServerError, err.Error())
+                        return
+                }
+                writeJSON(w, http.StatusOK, prof)
+
+        default:
+                w.Header().Set("Allow", http.MethodGet + ", " + http.MethodPost)
+                writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+        }
+}
+
+// handleProfileSwitch switches the browser to a different profile.
+// The current cookies are cleared and the profile's cookies are loaded.
+// Pass an empty id to clear the active profile (cookies are kept as-is).
+//
+// POST /agent/profiles/switch
+// body: {"id": "profile-uuid"}  or {"id": ""} to clear
+func (s *Server) handleProfileSwitch(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+                w.Header().Set("Allow", http.MethodPost)
+                writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+                return
+        }
+        var body struct {
+                ID string `json:"id"`
+        }
+        if err := readJSON(r, &body); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        if err := s.backend.SwitchToProfile(ctx, body.ID); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleProfileRename renames a profile.
+//
+// POST /agent/profiles/rename
+// body: {"id": "profile-uuid", "name": "new name"}
+func (s *Server) handleProfileRename(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+                w.Header().Set("Allow", http.MethodPost)
+                writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+                return
+        }
+        var body struct {
+                ID   string `json:"id"`
+                Name string `json:"name"`
+        }
+        if err := readJSON(r, &body); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if body.ID == "" || body.Name == "" {
+                writeError(w, http.StatusBadRequest, "id and name are required")
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := s.backend.RenameProfile(ctx, body.ID, body.Name); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleProfileDelete deletes a profile.
+//
+// POST /agent/profiles/delete
+// body: {"id": "profile-uuid"}
+func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+                w.Header().Set("Allow", http.MethodPost)
+                writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+                return
+        }
+        var body struct {
+                ID string `json:"id"`
+        }
+        if err := readJSON(r, &body); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if body.ID == "" {
+                writeError(w, http.StatusBadRequest, "id is required")
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := s.backend.DeleteProfile(ctx, body.ID); err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return
         }

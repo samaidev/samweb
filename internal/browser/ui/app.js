@@ -50,7 +50,20 @@ const el = {
   clearHistory: document.getElementById('clear-history'),
   bookmarksPopover: document.getElementById('bookmarks-popover'),
   bookmarksList: document.getElementById('bookmarks-list'),
+  // Profile management UI
+  profileWrap: document.getElementById('profile-wrap'),
+  profileSelect: document.getElementById('profile-select'),
+  profileSaveBtn: document.getElementById('profile-save-btn'),
+  profileManageBtn: document.getElementById('profile-manage-btn'),
+  profilePopover: document.getElementById('profile-popover'),
+  profileList: document.getElementById('profile-list'),
+  profileNewName: document.getElementById('profile-new-name'),
+  profileCreateBtn: document.getElementById('profile-create-btn'),
 };
+
+// Profile state: list of {id, name, cookie_count, created, updated} + activeProfileId
+state.profiles = [];
+state.activeProfileId = '';
 
 // ----------------------------- Bootstrap -----------------------------
 async function init() {
@@ -60,6 +73,7 @@ async function init() {
     state.engine = cfg.defaultEngine || 'Google';
   }
   bindEvents();
+  await refreshProfiles(); // load saved profiles into the dropdown
   newTab(); // start with a single fresh tab
 }
 
@@ -77,6 +91,12 @@ function bindEvents() {
   el.bookmarks.addEventListener('click', () => togglePopover('bookmarks'));
   el.engine.addEventListener('click', () => togglePopover('engine'));
   el.clearHistory.addEventListener('click', () => clearHistory());
+
+  // Profile events
+  el.profileSelect.addEventListener('change', () => switchProfile(el.profileSelect.value));
+  el.profileSaveBtn.addEventListener('click', () => quickSaveProfile());
+  el.profileManageBtn.addEventListener('click', () => togglePopover('profile'));
+  el.profileCreateBtn.addEventListener('click', () => createProfileFromInput());
 
   el.omnibox.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -262,7 +282,11 @@ function reloadActive() {
 
 // renderTab pushes the tab's state into the omnibox, nav buttons, and iframe.
 function renderTab(t) {
-  el.omnibox.value = displayURL(t.url);
+  // Don't clobber the omnibox if the user is currently typing in it.
+  // (iframe load events can trigger renderTab mid-typing.)
+  if (document.activeElement !== el.omnibox) {
+    el.omnibox.value = displayURL(t.url);
+  }
   updateOmniboxIcon(t.url);
   el.back.disabled = t.histIndex <= 0;
   el.forward.disabled = t.histIndex >= t.history.length - 1;
@@ -368,6 +392,7 @@ function togglePopover(name) {
   if (name === 'engine') { el.enginePopover.classList.remove('hidden'); renderEnginePopover(); }
   if (name === 'history') { el.historyPopover.classList.remove('hidden'); renderHistoryPopover(); }
   if (name === 'bookmarks') { el.bookmarksPopover.classList.remove('hidden'); renderBookmarksPopover(); }
+  if (name === 'profile') { el.profilePopover.classList.remove('hidden'); renderProfilePopover(); }
 }
 
 function closePopovers() {
@@ -375,6 +400,7 @@ function closePopovers() {
   el.enginePopover.classList.add('hidden');
   el.historyPopover.classList.add('hidden');
   el.bookmarksPopover.classList.add('hidden');
+  el.profilePopover.classList.add('hidden');
 }
 
 function renderEnginePopover() {
@@ -582,4 +608,253 @@ window.canForward = function() {
   const t = activeTab();
   return !!(t && t.histIndex < t.history.length - 1);
 };
+
+// ----------------------------- Profiles (multi-account cookie sets) -----------------------------
+//
+// Profiles let the user save the current browser cookies under a name
+// (e.g. "z.ai account A") and switch between them. This enables running
+// multiple accounts on the same site simultaneously in a single samweb
+// instance. The Go backend handles the actual cookie snapshot/restore
+// via CDP; the UI just calls the HTTP API.
+
+async function refreshProfiles() {
+  try {
+    const r = await fetchJSON('/api/config'); // ensure server is up
+    void r;
+    const resp = await fetch('/agent/profiles', {
+      headers: { 'Accept': 'application/json' },
+    });
+    if (!resp.ok) {
+      console.warn('profile list fetch failed:', resp.status);
+      return;
+    }
+    const data = await resp.json();
+    state.profiles = data.profiles || [];
+    state.activeProfileId = data.active_profile_id || '';
+    renderProfileSelect();
+  } catch (e) {
+    console.warn('refreshProfiles error:', e);
+  }
+}
+
+function renderProfileSelect() {
+  // Preserve current selection (or use state.activeProfileId)
+  const prev = el.profileSelect.value || state.activeProfileId || '';
+  el.profileSelect.innerHTML = '';
+  // Default option: no profile
+  const defOpt = document.createElement('option');
+  defOpt.value = '';
+  defOpt.textContent = '默认（无 profile）';
+  el.profileSelect.appendChild(defOpt);
+  for (const p of state.profiles) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = `${p.name} (${p.cookie_count} cookies)`;
+    el.profileSelect.appendChild(opt);
+  }
+  // Restore selection
+  if (prev && state.profiles.some(p => p.id === prev)) {
+    el.profileSelect.value = prev;
+  } else {
+    el.profileSelect.value = state.activeProfileId || '';
+  }
+}
+
+function renderProfilePopover() {
+  el.profileList.innerHTML = '';
+  if (state.profiles.length === 0) {
+    el.profileList.innerHTML = '<div class="empty">No profiles yet. Save current cookies to create one.</div>';
+    return;
+  }
+  for (const p of state.profiles) {
+    const node = document.createElement('div');
+    node.className = 'profile-item' + (p.id === state.activeProfileId ? ' active' : '');
+    const updated = new Date(p.updated * 1000).toLocaleString();
+    node.innerHTML = `
+      <span class="profile-name">${escapeHTML(p.name)}</span>
+      <span class="profile-meta">${p.cookie_count} cookies · ${escapeHTML(updated)}</span>
+      <div class="profile-actions">
+        <button class="profile-rename" title="Rename">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+        </button>
+        <button class="profile-delete" title="Delete">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path></svg>
+        </button>
+      </div>`;
+    node.addEventListener('click', async (e) => {
+      if (e.target.closest('.profile-rename')) {
+        e.stopPropagation();
+        const newName = prompt('Rename profile to:', p.name);
+        if (newName && newName.trim()) {
+          await renameProfile(p.id, newName.trim());
+        }
+      } else if (e.target.closest('.profile-delete')) {
+        e.stopPropagation();
+        if (confirm(`Delete profile "${p.name}"? This cannot be undone.`)) {
+          await deleteProfile(p.id);
+        }
+      } else {
+        // Click on the row switches to this profile
+        await switchProfile(p.id);
+        closePopovers();
+      }
+    });
+    el.profileList.appendChild(node);
+  }
+}
+
+async function createProfileFromInput() {
+  const name = el.profileNewName.value.trim();
+  if (!name) {
+    el.profileNewName.focus();
+    return;
+  }
+  el.profileCreateBtn.disabled = true;
+  el.profileCreateBtn.textContent = 'Saving...';
+  try {
+    const resp = await fetch('/agent/profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      alert('Failed to save profile: ' + err);
+      return;
+    }
+    const prof = await resp.json();
+    el.profileNewName.value = '';
+    await refreshProfiles();
+    // Auto-switch to the newly created profile
+    await switchProfile(prof.id);
+    renderProfilePopover();
+  } catch (e) {
+    alert('Error saving profile: ' + e.message);
+  } finally {
+    el.profileCreateBtn.disabled = false;
+    el.profileCreateBtn.textContent = 'Save current';
+  }
+}
+
+async function quickSaveProfile() {
+  // Quick-save: update the current profile (if any) or prompt for a new name
+  if (state.activeProfileId) {
+    const active = state.profiles.find(p => p.id === state.activeProfileId);
+    if (active) {
+      // Update existing
+      try {
+        const resp = await fetch('/agent/profiles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: active.name }),
+        });
+        if (resp.ok) {
+          await refreshProfiles();
+          flashProfileSaved();
+        } else {
+          alert('Failed to update profile: ' + await resp.text());
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+      return;
+    }
+  }
+  // No active profile — prompt for a new name
+  const name = prompt('Save current cookies to a new profile. Profile name:');
+  if (name && name.trim()) {
+    try {
+      const resp = await fetch('/agent/profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      if (resp.ok) {
+        const prof = await resp.json();
+        await refreshProfiles();
+        await switchProfile(prof.id);
+        flashProfileSaved();
+      } else {
+        alert('Failed: ' + await resp.text());
+      }
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  }
+}
+
+function flashProfileSaved() {
+  // Brief visual feedback — change icon color for 800ms
+  el.profileSaveBtn.style.color = '#34a853';
+  setTimeout(() => { el.profileSaveBtn.style.color = ''; }, 800);
+}
+
+async function switchProfile(id) {
+  // Don't switch if already on this profile
+  if (id === state.activeProfileId && id !== '') return;
+  try {
+    const resp = await fetch('/agent/profiles/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    if (!resp.ok) {
+      alert('Failed to switch profile: ' + await resp.text());
+      // Revert dropdown
+      el.profileSelect.value = state.activeProfileId || '';
+      return;
+    }
+    state.activeProfileId = id;
+    // Reload the current page so the new cookies take effect
+    reloadActive();
+  } catch (e) {
+    alert('Error switching profile: ' + e.message);
+    el.profileSelect.value = state.activeProfileId || '';
+  }
+}
+
+async function renameProfile(id, newName) {
+  try {
+    const resp = await fetch('/agent/profiles/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name: newName }),
+    });
+    if (!resp.ok) {
+      alert('Failed to rename: ' + await resp.text());
+      return;
+    }
+    await refreshProfiles();
+    renderProfilePopover();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+async function deleteProfile(id) {
+  try {
+    const resp = await fetch('/agent/profiles/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    if (!resp.ok) {
+      alert('Failed to delete: ' + await resp.text());
+      return;
+    }
+    // If the deleted profile was active, fall back to default
+    if (state.activeProfileId === id) {
+      state.activeProfileId = '';
+    }
+    await refreshProfiles();
+    renderProfilePopover();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// Export profile functions for agent control
+window.refreshProfiles = refreshProfiles;
+window.switchProfile = switchProfile;
+window.quickSaveProfile = quickSaveProfile;
 

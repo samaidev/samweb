@@ -46,6 +46,19 @@
     </div>
 
     <div class="toolbar-actions">
+      <!-- Profile selector: switch between multiple accounts on the same site -->
+      <div id="profile-wrap" class="profile-wrap" title="Cookie profile (switch accounts)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+        <select id="profile-select" class="profile-select" title="Switch cookie profile">
+          <option value="">默认（无 profile）</option>
+        </select>
+        <button id="profile-save-btn" class="profile-action" title="Save current cookies to a profile">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+        </button>
+        <button id="profile-manage-btn" class="profile-action" title="Manage profiles (rename / delete)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
+        </button>
+      </div>
       <button id="history-btn" class="icon-btn" title="History (Ctrl+H)">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
       </button>
@@ -80,6 +93,15 @@
   <div id="bookmarks-popover" class="popover hidden">
     <div class="popover-title">Bookmarks</div>
     <div id="bookmarks-list" class="link-list"></div>
+  </div>
+
+  <div id="profile-popover" class="popover hidden">
+    <div class="popover-title">Cookie Profiles</div>
+    <div id="profile-list" class="link-list"></div>
+    <div class="profile-create-row">
+      <input id="profile-new-name" type="text" placeholder="New profile name" autocomplete="off" />
+      <button id="profile-create-btn" class="popover-action">Save current</button>
+    </div>
   </div>
 
   <script src="app.js"></script>
