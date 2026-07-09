@@ -556,31 +556,30 @@ func antiDetectionJS() string {
     }
   } catch (e) {}
 
-  // 13. isTrusted hook — make ALL events report isTrusted=true.
-  // This is the critical hook for bypassing Aliyun baxia / Geetest /
-  // Tencent captcha sliders that check event.isTrusted to reject
-  // JS-dispatched (synthetic) events.
+  // 13. isTrusted hook — REMOVED.
   //
-  // event.isTrusted is a readonly getter on Event.prototype implemented
-  // in C++ (not overridable via Object.defineProperty in some browsers).
-  // We override the isTrusted property on Event.prototype.
+  // Previously we overrode Event.prototype.isTrusted with a getter that
+  // always returned true, to bypass Aliyun baxia / Geetest / Tencent
+  // captcha sliders that check event.isTrusted on JS-dispatched events.
   //
-  // This runs at document_start (via webview.Init /
-  // AddScriptToExecuteOnDocumentCreated), BEFORE any page JS executes,
-  // so baxia's slider JS sees isTrusted=true on our dispatched events.
+  // HOWEVER, this hook broke real user input: many browser internals
+  // (button click default behavior, <a> navigation, form submission)
+  // depend on isTrusted being correctly set by the browser. By replacing
+  // the property with a getter-only descriptor, we also removed the
+  // setter that the browser uses internally to mark real user events,
+  // causing real left-clicks to be silently dropped.
+  //
+  // For captcha bypass, use /agent/drag-trusted instead — it injects
+  // mouse events via CDP Input.dispatchMouseEvent, which produces
+  // genuinely isTrusted=true events without any JS hooks.
   try {
-    // Save original Event constructor
-    var OrigEvent = window.Event;
-    // Override the isTrusted property on Event.prototype.
-    // In WebView2 (Chromium), isTrusted IS configurable via
-    // defineProperty when done at document_start before any page JS
-    // has a chance to lock it.
-    var isTrustedOriginal = Object.getOwnPropertyDescriptor(Event.prototype, 'isTrusted');
-    if (isTrustedOriginal) {
-      Object.defineProperty(Event.prototype, 'isTrusted', {
-        get: function() { return true; },
-        configurable: true
-      });
+    // If a previous version of this script already installed the hook,
+    // restore the original isTrusted property. This makes the fix
+    // effective immediately even for pages loaded from cache.
+    var desc = Object.getOwnPropertyDescriptor(Event.prototype, 'isTrusted');
+    if (desc && desc.get && !desc.set && desc.configurable) {
+      // The hook is installed — delete it so the native getter takes over.
+      delete Event.prototype.isTrusted;
     }
   } catch (e) {}
 })();
