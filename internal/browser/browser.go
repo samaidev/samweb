@@ -29,6 +29,7 @@ import (
         "strings"
         "sync"
         "time"
+        "unsafe"
 
         "github.com/samaidev/samweb/internal/agent"
         "github.com/samaidev/samweb/internal/cdp"
@@ -207,6 +208,24 @@ func Run(opts Options) error {
                         log.Printf("[browser] CDP client connected on port %d", opts.CDPPort)
                 }()
         }
+
+        // Start a goroutine that periodically forces input focus to the webview
+        // window. This works around a webview_go / WebView2 issue where mouse
+        // click events are not delivered to the WebView2 rendering engine when
+        // the window is activated programmatically (e.g. via schtasks in an
+        // RDP session). By repeatedly calling SetForegroundWindow + SetFocus,
+        // we ensure the WebView2 controller receives input focus.
+        go func() {
+                hwnd := w.Window()
+                if hwnd == nil {
+                        return
+                }
+                hwndPtr := uintptr(hwnd)
+                for {
+                        time.Sleep(2 * time.Second)
+                        forceFocusToWindow(hwndPtr)
+                }
+        }()
 
         w.Run()
 
