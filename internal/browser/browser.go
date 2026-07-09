@@ -161,7 +161,10 @@ func Run(opts Options) error {
         // what lets SamWeb drive sites protected by Aliyun baxia /
         // Cloudflare bot management / PerimeterX without being
         // immediately flagged as a bot.
-        w.Init(antiDetectionJS())
+        //
+        // TEMPORARILY DISABLED: anti-detection JS was breaking left-click
+        // input. Re-enable once we identify which specific hook causes it.
+        // w.Init(antiDetectionJS())
         w.Init(agentBootstrapJS(uiPort))
         w.Bind("samwebResolve", func(input string) (string, error) {
                 return search.Resolve(input, engine), nil
