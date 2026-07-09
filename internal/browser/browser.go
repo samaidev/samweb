@@ -215,11 +215,23 @@ func Run(opts Options) error {
         // RDP session). By repeatedly calling SetForegroundWindow + SetFocus,
         // we ensure the WebView2 controller receives input focus.
         go func() {
-                hwnd := w.Window()
-                if hwnd == nil {
+                // Wait for the webview window to be fully initialized.
+                // w.Window() may return nil if called before w.Run() starts
+                // the message loop.
+                var hwndPtr uintptr
+                for i := 0; i < 30; i++ {
+                        time.Sleep(500 * time.Millisecond)
+                        hwnd := w.Window()
+                        if hwnd != nil {
+                                hwndPtr = uintptr(hwnd)
+                                break
+                        }
+                }
+                if hwndPtr == 0 {
+                        log.Printf("[browser] force-focus: could not get window handle")
                         return
                 }
-                hwndPtr := uintptr(hwnd)
+                log.Printf("[browser] force-focus: started, hwnd=0x%x", hwndPtr)
                 for {
                         time.Sleep(2 * time.Second)
                         forceFocusToWindow(hwndPtr)
