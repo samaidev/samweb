@@ -1,16 +1,19 @@
-"""SSH transport to shan.aitun.cc via aitun ssh-proxy + paramiko.
+"""SSH transport to shan.aitun.cc via aitun ssh-proxy or direct SSH + paramiko.
 
-This is the same approach as scripts/probe_shan.py but factored into a
-reusable module so all the zai_*.py scripts can share one connection
-helper.
+Supports two connection modes:
+  1. Direct SSH (default) — paramiko connects directly to host:port
+  2. aitun ssh-proxy — when AITUN is set or direct SSH fails
 
 Usage:
     from shan_lib.ssh import open_ssh, run, run_many
 
     client, proc, _ = open_ssh()
-    rc, out, err = run(client, "tasklist /FI \"IMAGENAME eq samweb.exe\"")
+    rc, out, err = run(client, "tasklist /FI \\"IMAGENAME eq samweb.exe\\"")
     print(out)
     client.close(); proc.terminate()
+
+    # Force aitun mode
+    client, proc, _ = open_ssh(use_aitun=True)
 """
 import os
 import socket
@@ -21,11 +24,11 @@ import time
 
 import paramiko
 
-AITUN = "/home/z/.venv/bin/aitun"
-HOST = "shan.aitun.cc"
-PORT = "22"
-USER = "Administrator"
-PASS = "dongshan168"
+AITUN = os.environ.get('AITUN_PATH', '/home/z/.local/bin/aitun')
+HOST = os.environ.get('SHAN_HOST', 'shan.aitun.cc')
+PORT = int(os.environ.get('SHAN_PORT', '22'))
+USER = os.environ.get('SHAN_USER', 'Administrator')
+PASS = os.environ.get('SHAN_PASS', 'dongshan168')
 
 
 class PipeSocket:
@@ -115,7 +118,7 @@ class PipeSocket:
         self._client.settimeout(t)
 
     def getpeername(self):
-        return (HOST, int(PORT))
+        return (HOST, PORT)
 
     def fileno(self):
         return self._client.fileno()
@@ -124,15 +127,29 @@ class PipeSocket:
         return self._client.gettimeout()
 
 
-def open_ssh(verbose=False):
-    """Open an SSH client to shan via aitun. Returns (client, proc, sock)."""
+def _connect_direct(verbose=False):
+    """Try direct paramiko SSH connection. Returns (client, None, None)."""
     if verbose:
-        print(f"[ssh] spawning aitun ssh-proxy {HOST} {PORT} ...")
+        print(f"[ssh] direct SSH to {USER}@{HOST}:{PORT}")
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(
+        hostname=HOST, port=PORT, username=USER, password=PASS,
+        look_for_keys=False, allow_agent=False, timeout=30,
+        banner_timeout=30, auth_timeout=30,
+    )
+    return client, None, None
+
+
+def _connect_aitun(verbose=False):
+    """Connect via aitun ssh-proxy. Returns (client, proc, sock)."""
+    if not os.path.isfile(AITUN) or not os.access(AITUN, os.X_OK):
+        raise FileNotFoundError(f"aitun not found at {AITUN}")
+    if verbose:
+        print(f"[ssh] spawning: {AITUN} ssh-proxy {HOST} {PORT}")
     proc = subprocess.Popen(
-        [AITUN, "ssh-proxy", HOST, PORT],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        [AITUN, "ssh-proxy", HOST, str(PORT)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         bufsize=0,
     )
 
@@ -151,17 +168,66 @@ def open_ssh(verbose=False):
 
     sock = PipeSocket(proc)
     if verbose:
-        print(f"[ssh] connecting via paramiko to {USER}@{HOST} ...")
+        print(f"[ssh] paramiko via aitun to {USER}@{HOST}")
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect(
-        hostname=HOST, port=int(PORT), username=USER, password=PASS,
+        hostname=HOST, port=PORT, username=USER, password=PASS,
         look_for_keys=False, allow_agent=False, timeout=30,
         sock=sock, banner_timeout=30, auth_timeout=30,
     )
-    if verbose:
-        print("[ssh] connected")
     return client, proc, sock
+
+
+def _find_aitun():
+    """Search for aitun binary."""
+    candidates = [
+        AITUN,
+        '/usr/local/bin/aitun',
+        '/usr/bin/aitun',
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    try:
+        r = subprocess.run(['which', 'aitun'], capture_output=True, timeout=5)
+        if r.returncode == 0:
+            return r.stdout.decode().strip()
+    except Exception:
+        pass
+    return None
+
+
+def open_ssh(verbose=False, use_aitun=None):
+    """Open an SSH client to shan.
+
+    If use_aitun is None (default), tries direct SSH first, falls back to aitun.
+    If use_aitun is True, uses aitun directly.
+    If use_aitun is False, uses direct SSH only.
+
+    Returns (client, proc_or_None, sock_or_None).
+    """
+    if use_aitun is True:
+        return _connect_aitun(verbose=verbose)
+
+    if use_aitun is False:
+        return _connect_direct(verbose=verbose)
+
+    # Auto: try direct first, fall back to aitun
+    try:
+        return _connect_direct(verbose=verbose)
+    except Exception as e:
+        if verbose:
+            print(f"[ssh] direct failed: {e}, trying aitun...")
+        aitun_path = _find_aitun()
+        if aitun_path:
+            global AITUN
+            AITUN = aitun_path
+            return _connect_aitun(verbose=verbose)
+        raise RuntimeError(
+            f"Direct SSH failed ({e}) and aitun not found. "
+            f"Set AITUN_PATH env var or use_aitun=True."
+        ) from e
 
 
 def run(client, cmd, timeout=120):

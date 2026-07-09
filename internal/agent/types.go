@@ -169,14 +169,39 @@ type ElementsResult struct {
         Count    int       `json:"count"`
 }
 
+// NetworkHeader is a single HTTP header key-value pair.
+type NetworkHeader struct {
+        Name  string `json:"name"`
+        Value string `json:"value"`
+}
+
+// NetworkCookie is a cookie attached to a request.
+type NetworkCookie struct {
+        Name  string `json:"name"`
+        Value string `json:"value"`
+}
+
 // CapturedRequest is a network request captured via CDP Network domain.
 type CapturedRequest struct {
-        URL          string `json:"url"`
-        Method       string `json:"method"`
-        PostData     string `json:"postData,omitempty"`
-        Status       int    `json:"status"`
-        ResponseBody string `json:"responseBody,omitempty"`
-        ResourceType string `json:"resourceType,omitempty"`
+        // Request info
+        RequestID        string          `json:"requestId"`
+        URL              string          `json:"url"`
+        Method           string          `json:"method"`
+        ResourceType     string          `json:"resourceType,omitempty"`
+        PostData         string          `json:"postData,omitempty"`
+        RequestHeaders   []NetworkHeader `json:"requestHeaders,omitempty"`
+        Cookies          []NetworkCookie `json:"cookies,omitempty"`
+        // Response info
+        Status           int             `json:"status"`
+        StatusText       string          `json:"statusText,omitempty"`
+        ResponseHeaders  []NetworkHeader `json:"responseHeaders,omitempty"`
+        ResponseBody     string          `json:"responseBody,omitempty"`
+        ResponseContentType string       `json:"responseContentType,omitempty"`
+        ResponseSize     int64           `json:"responseSize,omitempty"`
+        // Timing
+        Timestamp        float64         `json:"timestamp,omitempty"`
+        WallTime         float64         `json:"wallTime,omitempty"`
+        Duration         float64         `json:"duration,omitempty"`
 }
 
 // RawMouseOpts controls a single CDP Input.dispatchMouseEvent.
@@ -188,4 +213,18 @@ type RawMouseOpts struct {
         Buttons    int     `json:"buttons"`    // bitmask: 1=left, 2=right, 4=middle
         ClickCount int     `json:"clickCount"`
         Timestamp  float64 `json:"timestamp,omitempty"` // monotonic timestamp in seconds
+}
+
+// BrowserCookie represents a cookie from the browser's cookie store.
+type BrowserCookie struct {
+        Name     string  `json:"name"`
+        Value    string  `json:"value"`
+        Domain   string  `json:"domain"`
+        Path     string  `json:"path"`
+        Expires  float64 `json:"expires"`
+        Size     int     `json:"size"`
+        HTTPOnly bool    `json:"httpOnly"`
+        Secure   bool    `json:"secure"`
+        Session  bool    `json:"session"`
+        SameSite string  `json:"sameSite"`
 }

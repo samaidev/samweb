@@ -260,6 +260,9 @@ func (m *MockBackend) GetCapturedRequests(ctx context.Context) ([]CapturedReques
         return nil, nil
 }
 func (m *MockBackend) ClearCapturedRequests(ctx context.Context) error { return nil }
+func (m *MockBackend) GetAllCookies(ctx context.Context) ([]BrowserCookie, error) {
+        return nil, fmt.Errorf("not supported on mock backend")
+}
 
 func (m *MockBackend) CDPRawMouse(ctx context.Context, opts RawMouseOpts) error {
         return fmt.Errorf("CDPRawMouse not supported on mock backend")

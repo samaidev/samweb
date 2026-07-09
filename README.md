@@ -26,6 +26,7 @@ SamWeb packages a Chrome-lookalike UI (tab strip, omnibox, back/forward/reload, 
 - **Breakthrough Framework** — pluggable system that auto-detects and bypasses slider captchas. Currently supports Aliyun baxia NoCaptcha.
 - **Cookie Persistence** — saves both proxy cookies AND WebView2 browser cookies to disk, so login sessions survive process restarts.
 - **CDP Screenshots** — captures actual rendered pixels via `Page.captureScreenshot` (not SVG foreignObject fallback).
+- **Network Traffic Inspector** — real-time network request capture via CDP, with full headers, cookies, POST data, response bodies, and timing.
 
 ---
 
@@ -136,7 +137,10 @@ go build -o samweb ./cmd/samweb
 │          ▲                │  │  - Input.dispatchMouseEvent │ │ │
 │          │ webview.Eval   │  │  - Page.captureScreenshot   │ │ │
 │          │ (via Dispatch) │  │  - Network.getAllCookies    │ │ │
-│  ┌───────┴────────────┐   │  │  - Target.attachToTarget   │ │ │
+│  ┌───────┴────────────┐   │  │  - Network.enable (full traffic)  │ │
+│  │  - Network.getResponseBody   │ │
+│  │  - Network.getAllCookies    │ │
+│  │  - Target.attachToTarget   │ │ │
 │  │ WebviewBackend     │   │  └─────────────────────────────┘ │ │
 │  │ + Breakthrough mgr │   │                                  │ │
 │  └───────┬────────────┘   │  ┌─────────────────────────────┐ │ │
@@ -269,7 +273,12 @@ For real browsing with anti-bot capabilities:
 | POST | `/agent/drag-trusted` | Full CDP drag (mousedown+move+mouseup) |
 | POST | `/agent/drag-touch` | CDP touch events (touchStart+move+End) |
 | GET  | `/agent/screenshot-trusted` | CDP `Page.captureScreenshot` (real pixels) |
-| POST | `/agent/network/enable` `/disable` `/requests` `/clear` | CDP Network capture |
+| POST | `/agent/network/enable` | Start capturing all network traffic (headers, cookies, bodies) |
+| POST | `/agent/network/disable` | Stop network capture |
+| GET | `/agent/network/requests` | Get captured requests (supports filters: `?url=`, `?method=`, `?type=`, `?status=`, `?hasPostData=true`, `?withBody=true`) |
+| POST | `/agent/network/clear` | Clear captured request buffer |
+| GET | `/agent/cookies` | Get all browser cookies from cookie store |
+| GET | `/agent/cookies?domain=z.ai` | Get cookies filtered by domain (substring match) |
 | **Breakthrough** | | |
 | POST | `/agent/breakthrough` | Auto-detect + bypass slider captcha |
 | **Cookie management** | | |
@@ -299,6 +308,7 @@ must carry `Authorization: Bearer <secret>`.
 - [x] ~~Aliyun baxia slider bypass~~ — DONE (CDP + JS Teleport)
 - [x] ~~Cookie persistence~~ — DONE (proxy jar + CDP browser cookies)
 - [x] ~~Breakthrough framework~~ — DONE (pluggable Challenge interface)
+- [x] ~~Network traffic inspector (full headers, cookies, response bodies, timing)~~ — DONE
 - [ ] Geetest slider support
 - [ ] Tencent captcha support
 - [ ] Per-tab cookie jar in the proxy

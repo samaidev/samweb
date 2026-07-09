@@ -36,6 +36,9 @@ type Client struct {
         captureMu        sync.RWMutex
         capturing        bool
         capturedRequests []CapturedRequest
+        // requestMap maps CDP requestId to the index in capturedRequests,
+        // so we can update the entry when responseReceived / loadingFinished fires.
+        requestMap       map[string]int
 }
 
 type cdpResponse struct {
@@ -84,9 +87,10 @@ func Connect(wsURL string) (*Client, error) {
                 return nil, fmt.Errorf("cdp: dial %s: %w", wsURL, err)
         }
         c := &Client{
-                conn:     conn,
-                pending:  map[int64]chan cdpResponse{},
-                endpoint: wsURL,
+                conn:       conn,
+                pending:    map[int64]chan cdpResponse{},
+                endpoint:   wsURL,
+                requestMap: map[string]int{},
         }
         go c.readLoop()
         log.Printf("[cdp] connected to %s", wsURL)
@@ -307,19 +311,20 @@ func (c *Client) Screenshot(fullPage bool) ([]byte, error) {
 }
 
 // EnableNetwork enables the CDP Network domain and captures all network
-// requests. After calling this, GetCapturedRequests returns a list of
-// all requests made by the page (including XHR, fetch, and resource
-// loads). This is used to capture baxia's verification API calls.
+// requests with full detail (headers, cookies, response body, timing).
+// After calling this, GetCapturedRequests returns a list of all requests
+// made by the page.
 func (c *Client) EnableNetwork() error {
         // Start capturing before enabling
         c.captureMu.Lock()
         c.capturing = true
         c.capturedRequests = nil
+        c.requestMap = map[string]int{}
         c.captureMu.Unlock()
         // Enable Network domain with response bodies
         _, err := c.send("Network.enable", map[string]interface{}{
-                "maxTotalBufferSize":    10 * 1024 * 1024,
-                "maxResourceBufferSize": 5 * 1024 * 1024,
+                "maxTotalBufferSize":    50 * 1024 * 1024,
+                "maxResourceBufferSize": 10 * 1024 * 1024,
         })
         return err
 }
@@ -343,25 +348,113 @@ func (c *Client) GetCapturedRequests() []CapturedRequest {
         return out
 }
 
+// NetworkHeader is a single HTTP header key-value pair.
+type NetworkHeader struct {
+        Name  string `json:"name"`
+        Value string `json:"value"`
+}
+
+// NetworkCookie is a cookie attached to a request (from request.headers.Cookie).
+type NetworkCookie struct {
+        Name  string `json:"name"`
+        Value string `json:"value"`
+}
+
 // CapturedRequest is a network request captured by EnableNetwork.
 type CapturedRequest struct {
-        URL       string `json:"url"`
-        Method    string `json:"method"`
-        PostData  string `json:"postData,omitempty"`
-        Status    int    `json:"status"`
-        ResponseBody string `json:"responseBody,omitempty"`
-        ResourceType string `json:"resourceType,omitempty"`
+        // Request info
+        RequestID      string           `json:"requestId"`
+        URL            string           `json:"url"`
+        Method         string           `json:"method"`
+        ResourceType   string           `json:"resourceType,omitempty"`
+        PostData       string           `json:"postData,omitempty"`
+        RequestHeaders []NetworkHeader  `json:"requestHeaders,omitempty"`
+        Cookies        []NetworkCookie  `json:"cookies,omitempty"`
+        // Response info
+        Status         int              `json:"status"`
+        StatusText     string           `json:"statusText,omitempty"`
+        ResponseHeaders []NetworkHeader `json:"responseHeaders,omitempty"`
+        ResponseBody   string           `json:"responseBody,omitempty"`
+        ResponseContentType string     `json:"responseContentType,omitempty"`
+        ResponseSize   int64            `json:"responseSize,omitempty"`
+        // Timing
+        Timestamp      float64          `json:"timestamp,omitempty"`
+        WallTime      float64          `json:"wallTime,omitempty"`
+        Duration      float64          `json:"duration,omitempty"`
 }
 
 // ClearCapturedRequests clears the captured requests buffer.
 func (c *Client) ClearCapturedRequests() {
         c.captureMu.Lock()
         c.capturedRequests = nil
+        c.requestMap = map[string]int{}
         c.captureMu.Unlock()
 }
 
-// handleEvent processes CDP events (Network.requestWillBeSent, etc.)
-// to capture network traffic.
+// parseHeaders converts a CDP headers map (map[string]string or
+// map[string][]string) into a sorted slice of NetworkHeader.
+func parseHeaders(raw json.RawMessage) []NetworkHeader {
+        // CDP sometimes sends headers as map[string]interface{} where values
+        // can be string or []string. Try the common map[string]string first.
+        var m map[string]string
+        if err := json.Unmarshal(raw, &m); err == nil {
+                out := make([]NetworkHeader, 0, len(m))
+                for k, v := range m {
+                        out = append(out, NetworkHeader{Name: k, Value: v})
+                }
+                return out
+        }
+        // Fallback: map[string]interface{}
+        var mi map[string]interface{}
+        if err := json.Unmarshal(raw, &mi); err != nil {
+                return nil
+        }
+        out := make([]NetworkHeader, 0, len(mi))
+        for k, v := range mi {
+                var vs string
+                switch val := v.(type) {
+                case string:
+                        vs = val
+                case []interface{}:
+                        // join multiple values with ", " like browsers do
+                        parts := make([]string, len(val))
+                        for i, p := range val {
+                                parts[i], _ = p.(string)
+                        }
+                        vs = strings.Join(parts, ", ")
+                }
+                out = append(out, NetworkHeader{Name: k, Value: vs})
+        }
+        return out
+}
+
+// parseCookies extracts cookies from a Cookie header value.
+func parseCookies(cookieHeader string) []NetworkCookie {
+        if cookieHeader == "" {
+                return nil
+        }
+        parts := strings.Split(cookieHeader, "; ")
+        cookies := make([]NetworkCookie, 0, len(parts))
+        for _, p := range parts {
+                p = strings.TrimSpace(p)
+                if p == "" {
+                        continue
+                }
+                idx := strings.Index(p, "=")
+                if idx < 0 {
+                        continue
+                }
+                cookies = append(cookies, NetworkCookie{
+                        Name:  p[:idx],
+                        Value: p[idx+1:],
+                })
+        }
+        return cookies
+}
+
+// handleEvent processes CDP events (Network.requestWillBeSent,
+// Network.responseReceived, Network.loadingFinished) to capture
+// full network traffic including headers, cookies, and response bodies.
 func (c *Client) handleEvent(method string, params json.RawMessage) {
         c.captureMu.RLock()
         capturing := c.capturing
@@ -374,28 +467,160 @@ func (c *Client) handleEvent(method string, params json.RawMessage) {
         case "Network.requestWillBeSent":
                 var ev struct {
                         Request struct {
-                                URL    string `json:"url"`
-                                Method string `json:"method"`
-                                PostData string `json:"postData"`
+                                URL      string          `json:"url"`
+                                Method   string          `json:"method"`
+                                PostData string          `json:"postData"`
+                                Headers  json.RawMessage `json:"headers"`
                         } `json:"request"`
-                        Type string `json:"type"`
-                        RequestID string `json:"requestId"`
+                        Type      string  `json:"type"`
+                        RequestID string  `json:"requestId"`
+                        Timestamp float64 `json:"timestamp"`
+                        WallTime float64 `json:"wallTime"`
+                }
+                if err := json.Unmarshal(params, &ev); err != nil {
+                        return
+                }
+
+                req := CapturedRequest{
+                        RequestID:    ev.RequestID,
+                        URL:          ev.Request.URL,
+                        Method:       ev.Request.Method,
+                        PostData:     ev.Request.PostData,
+                        ResourceType: ev.Type,
+                        Timestamp:    ev.Timestamp,
+                        WallTime:     ev.WallTime,
+                }
+                // Parse request headers
+                if len(ev.Request.Headers) > 0 {
+                        req.RequestHeaders = parseHeaders(ev.Request.Headers)
+                        // Extract cookies from the Cookie header
+                        for _, h := range req.RequestHeaders {
+                                if strings.EqualFold(h.Name, "cookie") {
+                                        req.Cookies = parseCookies(h.Value)
+                                        break
+                                }
+                        }
+                }
+
+                c.captureMu.Lock()
+                idx := len(c.capturedRequests)
+                c.capturedRequests = append(c.capturedRequests, req)
+                c.requestMap[ev.RequestID] = idx
+                c.captureMu.Unlock()
+
+        case "Network.responseReceived":
+                var ev struct {
+                        RequestID  string          `json:"requestId"`
+                        Type       string          `json:"type"`
+                        Response   struct {
+                                Status         int             `json:"status"`
+                                StatusText     string          `json:"statusText"`
+                                Headers        json.RawMessage `json:"headers"`
+                                ContentType    string          `json:"mimeType"`
+                                FromServiceWorker bool           `json:"fromServiceWorker"`
+                        } `json:"response"`
+                        Timestamp  float64 `json:"timestamp"`
                 }
                 if err := json.Unmarshal(params, &ev); err != nil {
                         return
                 }
                 c.captureMu.Lock()
-                c.capturedRequests = append(c.capturedRequests, CapturedRequest{
-                        URL: ev.Request.URL,
-                        Method: ev.Request.Method,
-                        PostData: ev.Request.PostData,
-                        ResourceType: ev.Type,
-                })
-                // Store request ID for later matching with response
-                if len(c.capturedRequests) > 0 {
-                        c.capturedRequests[len(c.capturedRequests)-1].Status = 0
+                idx, ok := c.requestMap[ev.RequestID]
+                if ok && idx < len(c.capturedRequests) {
+                        c.capturedRequests[idx].Status = ev.Response.Status
+                        c.capturedRequests[idx].StatusText = ev.Response.StatusText
+                        c.capturedRequests[idx].ResponseContentType = ev.Response.ContentType
+                        if ev.Timestamp > 0 {
+                                c.capturedRequests[idx].Duration = ev.Timestamp - c.capturedRequests[idx].Timestamp
+                        }
+                        if len(ev.Response.Headers) > 0 {
+                                c.capturedRequests[idx].ResponseHeaders = parseHeaders(ev.Response.Headers)
+                        }
                 }
                 c.captureMu.Unlock()
+
+        case "Network.loadingFinished":
+                var ev struct {
+                        RequestID    string  `json:"requestId"`
+                        Timestamp    float64 `json:"timestamp"`
+                        EncodedDataLength float64 `json:"encodedDataLength"`
+                }
+                if err := json.Unmarshal(params, &ev); err != nil {
+                        return
+                }
+                // Asynchronously fetch the response body for interesting resources.
+                // We do this in a goroutine to avoid blocking the readLoop.
+                c.captureMu.RLock()
+                idx, ok := c.requestMap[ev.RequestID]
+                if !ok || idx >= len(c.capturedRequests) {
+                        c.captureMu.RUnlock()
+                        return
+                }
+                req := &c.capturedRequests[idx]
+                // Only fetch body for XHR/Fetch/Document types to avoid
+                // downloading large images/scripts.
+                shouldFetch := req.ResourceType == "XHR" ||
+                        req.ResourceType == "Fetch" ||
+                        req.ResourceType == "Document" ||
+                        req.ResourceType == "WebSocket" ||
+                        req.Status == 0 // retry if status not yet set
+                c.captureMu.RUnlock()
+
+                if ev.EncodedDataLength > 0 {
+                        c.captureMu.Lock()
+                        if idx < len(c.capturedRequests) {
+                                c.capturedRequests[idx].ResponseSize = int64(ev.EncodedDataLength)
+                        }
+                        c.captureMu.Unlock()
+                }
+
+                // Update duration
+                if ev.Timestamp > 0 {
+                        c.captureMu.Lock()
+                        if idx < len(c.capturedRequests) {
+                                c.capturedRequests[idx].Duration = ev.Timestamp - c.capturedRequests[idx].Timestamp
+                        }
+                        c.captureMu.Unlock()
+                }
+
+                if shouldFetch {
+                        go c.fetchResponseBody(ev.RequestID)
+                }
+        }
+}
+
+// fetchResponseBody calls Network.getResponseBody for a finished request
+// and stores the result in the captured request entry.
+func (c *Client) fetchResponseBody(requestID string) {
+        resp, err := c.send("Network.getResponseBody", map[string]interface{}{
+                "requestId": requestID,
+        })
+        if err != nil {
+                return // body not available (e.g. cached, redirected)
+        }
+        var result struct {
+                Body          string `json:"body"`
+                Base64Encoded bool   `json:"base64Encoded"`
+        }
+        if err := json.Unmarshal(resp, &result); err != nil {
+                return
+        }
+        c.captureMu.Lock()
+        defer c.captureMu.Unlock()
+        idx, ok := c.requestMap[requestID]
+        if !ok || idx >= len(c.capturedRequests) {
+                return
+        }
+        if result.Base64Encoded {
+                // Store raw base64, let the consumer decode
+                c.capturedRequests[idx].ResponseBody = "[base64]" + result.Body
+        } else {
+                // Truncate very large bodies to avoid memory issues
+                body := result.Body
+                if len(body) > 512*1024 {
+                        body = body[:512*1024] + "... [truncated]"
+                }
+                c.capturedRequests[idx].ResponseBody = body
         }
 }
 func (c *Client) readLoop() {

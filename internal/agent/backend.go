@@ -48,6 +48,10 @@ type Backend interface {
         GetCapturedRequests(ctx context.Context) ([]CapturedRequest, error)
         ClearCapturedRequests(ctx context.Context) error
 
+        // GetAllCookies returns all cookies from the browser's cookie store
+        // via CDP Network.getAllCookies.
+        GetAllCookies(ctx context.Context) ([]BrowserCookie, error)
+
         // CDPRawMouse sends a single CDP Input.dispatchMouseEvent.
         CDPRawMouse(ctx context.Context, opts RawMouseOpts) error
 

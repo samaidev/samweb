@@ -106,6 +106,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/network/disable", s.handleNetworkDisable)
         mux.HandleFunc("/agent/network/requests", s.handleNetworkRequests)
         mux.HandleFunc("/agent/network/clear", s.handleNetworkClear)
+        mux.HandleFunc("/agent/cookies", s.handleCookies)
         mux.HandleFunc("/agent/cdp-mouse", s.handleCDPRawMouse)
         mux.HandleFunc("/agent/breakthrough", s.handleBreakthrough)
 
@@ -440,6 +441,13 @@ func (s *Server) handleNetworkDisable(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleNetworkRequests returns all captured network requests.
+// Supports query params for filtering:
+//   - url: substring match on URL
+//   - method: exact match on HTTP method (GET, POST, etc.)
+//   - type: resource type (XHR, Fetch, Document, Script, etc.)
+//   - status: HTTP status code (e.g. 200, 404)
+//   - hasPostData: if "true", only return requests with POST data
+//   - withBody: if "true", only return requests that have a response body
 func (s *Server) handleNetworkRequests(w http.ResponseWriter, r *http.Request) {
         ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
         defer cancel()
@@ -448,9 +456,81 @@ func (s *Server) handleNetworkRequests(w http.ResponseWriter, r *http.Request) {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return
         }
+
+        // Apply filters from query params
+        q := r.URL.Query()
+        filterURL := q.Get("url")
+        filterMethod := q.Get("method")
+        filterType := q.Get("type")
+        filterStatus := q.Get("status")
+        filterHasPostData := q.Get("hasPostData")
+        filterWithBody := q.Get("withBody")
+
+        filtered := reqs
+        if filterURL != "" || filterMethod != "" || filterType != "" ||
+                filterStatus != "" || filterHasPostData != "" || filterWithBody != "" {
+                filtered = make([]CapturedRequest, 0, len(reqs))
+                for _, req := range reqs {
+                        if filterURL != "" && !strings.Contains(req.URL, filterURL) {
+                                continue
+                        }
+                        if filterMethod != "" && req.Method != filterMethod {
+                                continue
+                        }
+                        if filterType != "" && req.ResourceType != filterType {
+                                continue
+                        }
+                        if filterStatus != "" {
+                                code, err := strconv.Atoi(filterStatus)
+                                if err == nil && req.Status != code {
+                                        continue
+                                }
+                        }
+                        if filterHasPostData == "true" && req.PostData == "" {
+                                continue
+                        }
+                        if filterWithBody == "true" && req.ResponseBody == "" {
+                                continue
+                        }
+                        filtered = append(filtered, req)
+                }
+        }
+
         writeJSON(w, http.StatusOK, map[string]interface{}{
-                "requests": reqs,
-                "count":    len(reqs),
+                "requests": filtered,
+                "count":    len(filtered),
+                "total":    len(reqs),
+        })
+}
+
+// handleCookies returns all cookies from the browser's cookie store.
+// Supports query param "domain" to filter cookies by domain (substring match).
+func (s *Server) handleCookies(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        cookies, err := s.backend.GetAllCookies(ctx)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        // Filter by domain if requested
+        filterDomain := r.URL.Query().Get("domain")
+        if filterDomain != "" {
+                filtered := make([]BrowserCookie, 0, len(cookies))
+                for _, ck := range cookies {
+                        if strings.Contains(ck.Domain, filterDomain) {
+                                filtered = append(filtered, ck)
+                        }
+                }
+                writeJSON(w, http.StatusOK, map[string]interface{}{
+                        "cookies": filtered,
+                        "count":   len(filtered),
+                })
+                return
+        }
+        writeJSON(w, http.StatusOK, map[string]interface{}{
+                "cookies": cookies,
+                "count":   len(cookies),
         })
 }
 

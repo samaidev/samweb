@@ -492,10 +492,68 @@ func (b *WebviewBackend) GetCapturedRequests(ctx context.Context) ([]agent.Captu
         reqs := c.GetCapturedRequests()
         out := make([]agent.CapturedRequest, len(reqs))
         for i, r := range reqs {
+                // Map request headers
+                rhs := make([]agent.NetworkHeader, len(r.RequestHeaders))
+                for j, h := range r.RequestHeaders {
+                        rhs[j] = agent.NetworkHeader{Name: h.Name, Value: h.Value}
+                }
+                // Map cookies
+                cks := make([]agent.NetworkCookie, len(r.Cookies))
+                for j, ck := range r.Cookies {
+                        cks[j] = agent.NetworkCookie{Name: ck.Name, Value: ck.Value}
+                }
+                // Map response headers
+                respHS := make([]agent.NetworkHeader, len(r.ResponseHeaders))
+                for j, h := range r.ResponseHeaders {
+                        respHS[j] = agent.NetworkHeader{Name: h.Name, Value: h.Value}
+                }
                 out[i] = agent.CapturedRequest{
-                        URL: r.URL, Method: r.Method, PostData: r.PostData,
-                        Status: r.Status, ResponseBody: r.ResponseBody,
-                        ResourceType: r.ResourceType,
+                        RequestID:          r.RequestID,
+                        URL:                r.URL,
+                        Method:             r.Method,
+                        ResourceType:       r.ResourceType,
+                        PostData:           r.PostData,
+                        RequestHeaders:     rhs,
+                        Cookies:            cks,
+                        Status:             r.Status,
+                        StatusText:         r.StatusText,
+                        ResponseHeaders:    respHS,
+                        ResponseBody:       r.ResponseBody,
+                        ResponseContentType: r.ResponseContentType,
+                        ResponseSize:       r.ResponseSize,
+                        Timestamp:          r.Timestamp,
+                        WallTime:           r.WallTime,
+                        Duration:           r.Duration,
+                }
+        }
+        return out, nil
+}
+
+// GetAllCookies returns all cookies from the browser's cookie store via CDP.
+func (b *WebviewBackend) GetAllCookies(ctx context.Context) ([]agent.BrowserCookie, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil, fmt.Errorf("CDP client not connected")
+        }
+        cookies, err := c.GetAllCookies()
+        if err != nil {
+                return nil, err
+        }
+        out := make([]agent.BrowserCookie, len(cookies))
+        for i, ck := range cookies {
+                out[i] = agent.BrowserCookie{
+                        Name:     ck.Name,
+                        Value:    ck.Value,
+                        Domain:   ck.Domain,
+                        Path:     ck.Path,
+                        Expires:  ck.Expires,
+                        Size:     ck.Size,
+                        HTTPOnly: ck.HTTPOnly,
+                        Secure:   ck.Secure,
+                        Session:  ck.Session,
+                        SameSite: ck.SameSite,
                 }
         }
         return out, nil
