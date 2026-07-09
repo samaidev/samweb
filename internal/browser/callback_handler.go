@@ -8,7 +8,7 @@ import (
 
 // base64Decode wraps base64.StdDecodeString.
 func base64Decode(s string) ([]byte, error) {
-        return base64.StdDecodeString(s)
+        return base64.StdEncoding.DecodeString(s)
 }
 
 // HandleCallbackHTTP is an http.HandlerFunc that receives JS callbacks

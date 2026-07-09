@@ -13,7 +13,6 @@ import (
         "net/url"
         "os"
         "strings"
-        "sync"
         "time"
 
         "github.com/samaidev/samweb/internal/agent"
@@ -23,7 +22,7 @@ import (
         "github.com/wailsapp/wails/v2"
         "github.com/wailsapp/wails/v2/pkg/options"
         "github.com/wailsapp/wails/v2/pkg/options/assetserver"
-        "github.com/wailsapp/wails/v2/pkg/runtime"
+        wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 //go:embed all:ui
@@ -173,7 +172,7 @@ func Run(opts Options) error {
                 },
                 OnDomReady: func(ctx context.Context) {
                         // Inject the agent bootstrap JS.
-                        runtime.ExecJS(ctx, agentJS)
+                        wailsRuntime.ExecJS(ctx, agentJS)
                         log.Printf("[browser] agent bootstrap JS injected")
                 },
                 Bind: []interface{}{
