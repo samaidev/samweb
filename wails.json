@@ -1,0 +1,21 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "SamWeb",
+  "outputfilename": "samweb",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "frontend:dir": "frontend",
+  "wailsjsdir": "",
+  "author": {
+    "name": "SamWeb",
+    "email": "dev@samweb.io"
+  },
+  "info": {
+    "productName": "SamWeb",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © 2026 SamWeb",
+    "comments": "Chrome-style web browser built with Go + WebView2"
+  }
+}
