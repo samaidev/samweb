@@ -172,7 +172,7 @@ func Run(opts Options) error {
                 },
                 OnDomReady: func(ctx context.Context) {
                         // Inject the agent bootstrap JS.
-                        wailsRuntime.ExecJS(ctx, agentJS)
+                        wailsRuntime.WindowExecJS(ctx, agentJS)
                         log.Printf("[browser] agent bootstrap JS injected")
                 },
                 Bind: []interface{}{

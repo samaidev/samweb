@@ -95,7 +95,7 @@ func (b *WailsBackend) dispatch(ctx context.Context, method string, params inter
         if b.ctx == nil {
                 return "", errors.New("wails context not set")
         }
-        wailsRuntime.ExecJS(b.ctx, js)
+        wailsRuntime.WindowExecJS(b.ctx, js)
 
         select {
         case r := <-ch:
