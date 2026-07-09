@@ -208,35 +208,30 @@ func Run(opts Options) error {
                 }()
         }
 
+        // Get the native window handle BEFORE starting w.Run() (which blocks).
+        // w.Window() is safe to call here because the webview was created by
+        // webview.New above and the window handle is set during construction.
+        nativeHwnd := w.Window()
+
         // Start a goroutine that periodically forces input focus to the webview
         // window. This works around a webview_go / WebView2 issue where mouse
         // click events are not delivered to the WebView2 rendering engine when
         // the window is activated programmatically (e.g. via schtasks in an
-        // RDP session). By repeatedly calling SetForegroundWindow + SetFocus,
-        // we ensure the WebView2 controller receives input focus.
-        go func() {
-                // Wait for the webview window to be fully initialized.
-                // w.Window() may return nil if called before w.Run() starts
-                // the message loop.
-                var hwndPtr uintptr
-                for i := 0; i < 30; i++ {
-                        time.Sleep(500 * time.Millisecond)
-                        hwnd := w.Window()
-                        if hwnd != nil {
-                                hwndPtr = uintptr(hwnd)
-                                break
+        // RDP session).
+        if nativeHwnd != nil {
+                hwndPtr := uintptr(nativeHwnd)
+                go func() {
+                        // Wait a bit for the window to be fully shown.
+                        time.Sleep(3 * time.Second)
+                        log.Printf("[browser] force-focus: started, hwnd=0x%x", hwndPtr)
+                        for {
+                                time.Sleep(2 * time.Second)
+                                forceFocusToWindow(hwndPtr)
                         }
-                }
-                if hwndPtr == 0 {
-                        log.Printf("[browser] force-focus: could not get window handle")
-                        return
-                }
-                log.Printf("[browser] force-focus: started, hwnd=0x%x", hwndPtr)
-                for {
-                        time.Sleep(2 * time.Second)
-                        forceFocusToWindow(hwndPtr)
-                }
-        }()
+                }()
+        } else {
+                log.Printf("[browser] force-focus: no window handle available")
+        }
 
         w.Run()
 
