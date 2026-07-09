@@ -84,9 +84,11 @@ func (s *ProfileStore) load() error {
 }
 
 // save writes the in-memory state to disk atomically.
+// The caller MUST hold s.mu (either read or write lock) — this function
+// does not acquire the lock itself to avoid re-entrant locking when
+// called from Create/Rename/Delete/Activate (which already hold the
+// write lock).
 func (s *ProfileStore) save() error {
-        s.mu.RLock()
-        defer s.mu.RUnlock()
         path := profilesFile()
         if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
                 return err
@@ -134,10 +136,7 @@ func (s *ProfileStore) Create(name string, cookies []cdp.CDPCookie) (Profile, er
                         s.state.Profiles[i].Cookies = cloneCookies(cookies)
                         s.state.Profiles[i].Updated = nowUnix()
                         prof := s.state.Profiles[i]
-                        s.mu.Unlock()
-                        err := s.save()
-                        s.mu.Lock()
-                        return prof, err
+                        return prof, s.save()
                 }
         }
 
@@ -170,10 +169,7 @@ func (s *ProfileStore) Create(name string, cookies []cdp.CDPCookie) (Profile, er
                 Updated: now,
         }
         s.state.Profiles = append(s.state.Profiles, prof)
-        s.mu.Unlock()
-        err := s.save()
-        s.mu.Lock()
-        return prof, err
+        return prof, s.save()
 }
 
 // Rename changes the user-visible name of a profile. The ID is preserved.
