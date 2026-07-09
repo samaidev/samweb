@@ -29,7 +29,6 @@ import (
         "strings"
         "sync"
         "time"
-        "unsafe"
 
         "github.com/samaidev/samweb/internal/agent"
         "github.com/samaidev/samweb/internal/cdp"
