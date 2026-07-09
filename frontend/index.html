@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>SamWeb</title></head>
+<body>
+<script>
+// Redirect to the UI HTTP server (loaded from embedded assets, then
+// redirected to the HTTP server so fetch() calls are same-origin with
+// /proxy, /api/*, /agent/*).
+(function() {
+  var port = window.__SAMWEB_UI_PORT__ || 0;
+  if (port) {
+    window.location.href = 'http://127.0.0.1:' + port + '/';
+  }
+})();
+</script>
+</body></html>
