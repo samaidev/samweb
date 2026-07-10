@@ -28,6 +28,25 @@ type Profile struct {
         // key→value strings. This is critical for sites like z.ai that
         // store their login JWT in localStorage, not just cookies.
         LocalStorage map[string]map[string]string `json:"local_storage,omitempty"`
+
+        // AICQ identity for this profile. When non-empty, the main
+        // samweb spawns an AICQ bridge alongside the tab worker to
+        // connect AICQ messages to z.ai.
+        AICQIdentity *AICQIdentity `json:"aicq_identity,omitempty"`
+
+        // ChatMappings maps AICQ friend_id → z.ai chat_id.
+        ChatMappings map[string]string `json:"chat_mappings,omitempty"`
+}
+
+// AICQIdentity stores the AICQ agent identity for a profile.
+type AICQIdentity struct {
+        AccountID   string `json:"account_id"`
+        SigningPub  string `json:"signing_pub"`
+        SigningSec  string `json:"signing_sec"`
+        ExchangePub string `json:"exchange_pub"`
+        ExchangeSec string `json:"exchange_sec"`
+        OwnerID     string `json:"owner_id"`
+        DBPath      string `json:"db_path"` // path to the AICQ SDK db file
 }
 
 // profilesFile is the on-disk JSON file for profile storage.

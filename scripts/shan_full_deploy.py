@@ -25,6 +25,7 @@ FILES = [
     ("/home/z/my-project/internal/cdp/client.go",             "C:/samweb/internal/cdp/client.go"),
     ("/home/z/my-project/internal/browser/ui/index.html",     "C:/samweb/internal/browser/ui/index.html"),
     ("/home/z/my-project/internal/browser/ui/app.js",         "C:/samweb/internal/browser/ui/app.js"),
+    ("/home/z/my-project/scripts/aicq_bridge.py",             "C:/samweb/scripts/aicq_bridge.py"),
 ]
 
 

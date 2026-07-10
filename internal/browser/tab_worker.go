@@ -139,13 +139,29 @@ func runTabWorker(opts Options) error {
                 backend.SetCDPClient(cdpClient)
                 log.Printf("[tab] CDP client connected on port %d", cdpPort)
 
-                // Navigate to StartURL
+                // Enable Page domain (needed for Page.navigate to work
+                // reliably in WebView2)
+                _ = cdpClient.EnablePage()
+
+                // Navigate to StartURL. Use Page.navigate, then verify
+                // the navigation took effect by checking location.href.
                 if opts.StartURL != "" && opts.StartURL != "about:blank" {
+                        // Try Page.navigate first
                         if err := cdpClient.Navigate(opts.StartURL); err != nil {
-                                log.Printf("[tab] warning: navigate to %s: %v", opts.StartURL, err)
-                        } else {
-                                log.Printf("[tab] navigated to %s", opts.StartURL)
+                                log.Printf("[tab] Page.navigate error: %v, trying location.href", err)
                         }
+                        time.Sleep(3 * time.Second)
+                        // Verify + fallback to location.href
+                        origin, _ := cdpClient.CurrentOrigin()
+                        if origin == "" || origin == "http://wails.localhost" {
+                                log.Printf("[tab] navigate didn't take effect, setting location.href via eval")
+                                _, _ = cdpClient.Send("Runtime.evaluate", map[string]interface{}{
+                                        "expression": fmt.Sprintf("window.location.href = %q;", opts.StartURL),
+                                })
+                        }
+                        time.Sleep(3 * time.Second)
+                        origin2, _ := cdpClient.CurrentOrigin()
+                        log.Printf("[tab] navigated to %s (origin now %s)", opts.StartURL, origin2)
                 }
 
                 // If this is a fresh user-data-dir, inject the profile's cookies

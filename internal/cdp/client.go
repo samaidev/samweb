@@ -828,6 +828,12 @@ func (c *Client) readLoop() {
         }
 }
 
+// Send is the public version of send, for use by other packages
+// (e.g. tab_worker.go needs to call Runtime.evaluate directly).
+func (c *Client) Send(method string, params interface{}) (json.RawMessage, error) {
+        return c.send(method, params)
+}
+
 // send sends a CDP command and waits for the response.
 func (c *Client) send(method string, params interface{}) (json.RawMessage, error) {
         id := c.nextID.Add(1)

@@ -311,6 +311,7 @@ var tabWorkerRegistry = struct {
 type tabWorkerProc struct {
         info       agent.TabWorkerInfo
         cmd        *exec.Cmd
+        bridgeCmd  *exec.Cmd  // AICQ bridge process (optional)
         agentPort  int
         cdpPort    int
 }
@@ -446,9 +447,20 @@ func (b *WailsBackend) SpawnTab(ctx context.Context, profileID, url string) (age
         }
         tabWorkerRegistry.mu.Unlock()
 
+        // If the profile has an AICQ identity, spawn an AICQ bridge
+        // process that connects to this tab worker's agent API + the
+        // profile's AICQ db.
+        if prof.AICQIdentity != nil && prof.AICQIdentity.DBPath != "" {
+                go spawnAICQBridge(profileID, agentPort, prof.AICQIdentity.DBPath)
+        }
+
         go func() {
                 _ = cmd.Wait()
                 tabWorkerRegistry.mu.Lock()
+                // Also kill the AICQ bridge if running
+                if bp, ok := tabWorkerRegistry.workers[profileID]; ok && bp.bridgeCmd != nil {
+                        _ = bp.bridgeCmd.Process.Kill()
+                }
                 delete(tabWorkerRegistry.workers, profileID)
                 tabWorkerRegistry.mu.Unlock()
                 log.Printf("[browser] tab worker for profile %s exited", profileID)
@@ -463,6 +475,80 @@ func (b *WailsBackend) SpawnTab(ctx context.Context, profileID, url string) (age
 var portAllocMu sync.Mutex
 
 // ListTabWorkers returns info about all running tab workers.
+// spawnAICQBridge spawns the AICQ bridge Python script for a tab worker.
+// The bridge connects to the tab worker's agent API (for z.ai DOM
+// automation) and the profile's AICQ db (for AICQ message polling).
+func spawnAICQBridge(profileID string, agentPort int, dbPath string) {
+        // Wait a bit for the tab worker to fully start (z.ai loaded)
+        time.Sleep(8 * time.Second)
+
+        // Find Python 3.13
+        pythonPaths := []string{
+                os.ExpandEnv("$LOCALAPPDATA\\Programs\\Python\\Python313\\python.exe"),
+                "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+                "python3",
+                "python",
+        }
+        var pythonExe string
+        for _, p := range pythonPaths {
+                if _, err := os.Stat(p); err == nil {
+                        pythonExe = p
+                        break
+                }
+        }
+        if pythonExe == "" {
+                log.Printf("[browser] AICQ bridge: python not found, skipping profile %s", profileID)
+                return
+        }
+
+        // Find aicq_bridge.py
+        bridgeScript := filepath.Join(os.Getenv("PROGRAMFILES"), "samweb", "scripts", "aicq_bridge.py")
+        if _, err := os.Stat(bridgeScript); err != nil {
+                // Try C:\samweb\scripts\
+                bridgeScript = "C:\\samweb\\scripts\\aicq_bridge.py"
+        }
+        if _, err := os.Stat(bridgeScript); err != nil {
+                log.Printf("[browser] AICQ bridge: script not found, skipping profile %s", profileID)
+                return
+        }
+
+        cmd := exec.Command(pythonExe, bridgeScript,
+                "--profile", profileID,
+                "--agent-port", fmt.Sprint(agentPort),
+                "--db-path", dbPath,
+        )
+        // Redirect bridge output to a log file
+        home, _ := os.UserHomeDir()
+        logPath := filepath.Join(home, ".samweb", "logs", profileID+"_bridge.log")
+        os.MkdirAll(filepath.Dir(logPath), 0755)
+        logFile, _ := os.Create(logPath)
+        if logFile != nil {
+                cmd.Stdout = logFile
+                cmd.Stderr = logFile
+        }
+        cmd.Stdin = nil
+
+        if err := cmd.Start(); err != nil {
+                log.Printf("[browser] AICQ bridge start failed for profile %s: %v", profileID, err)
+                return
+        }
+
+        // Store the bridge cmd so we can kill it when the tab worker exits
+        tabWorkerRegistry.mu.Lock()
+        if wp, ok := tabWorkerRegistry.workers[profileID]; ok {
+                wp.bridgeCmd = cmd
+        }
+        tabWorkerRegistry.mu.Unlock()
+
+        log.Printf("[browser] AICQ bridge started: profile=%s agent_port=%d db=%s pid=%d",
+                profileID, agentPort, dbPath, cmd.Process.Pid)
+
+        go func() {
+                _ = cmd.Wait()
+                log.Printf("[browser] AICQ bridge for profile %s exited", profileID)
+        }()
+}
+
 func (b *WailsBackend) ListTabWorkers(ctx context.Context) ([]agent.TabWorkerInfo, error) {
         tabWorkerRegistry.mu.Lock()
         defer tabWorkerRegistry.mu.Unlock()
