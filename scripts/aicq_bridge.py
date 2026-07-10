@@ -543,7 +543,8 @@ async def run_bridge(profile_id, agent_port, db_path):
 
         log(profile_id, "bridge ready, waiting for AICQ messages...")
 
-        # Step 4: Message loop
+        # Step 4: Message loop (serial — processes one message at a time,
+        # new messages queue up while z.ai is responding)
         while True:
             try:
                 msg = await asyncio.wait_for(message_queue.get(), timeout=60)
@@ -560,7 +561,17 @@ async def run_bridge(profile_id, agent_port, db_path):
 
             from_id = msg["from"]
             content = msg["content"]
-            log(profile_id, f"message from {from_id}: {content[:80]}...")
+            queue_size = message_queue.qsize()
+            if queue_size > 0:
+                log(profile_id, f"message from {from_id}: {content[:80]}... ({queue_size} more in queue)")
+                # Notify user that previous messages are still processing
+                try:
+                    await core.send_stream_chunk(from_id, "thinking",
+                        f"正在处理... 队列中还有 {queue_size} 条消息")
+                except Exception:
+                    pass
+            else:
+                log(profile_id, f"message from {from_id}: {content[:80]}...")
 
             # "/new" command: delete old chats + create a new z.ai chat,
             # then wait for the next message (don't send "/new" to z.ai).
