@@ -783,9 +783,15 @@ async def run_bridge(profile_id, agent_port, db_path):
                         stable_count = 0
                         log(profile_id, f"streaming... ({len(current_text)} chars)")
                     else:
-                        # Text unchanged — maybe z.ai is done
+                        # Text unchanged — maybe z.ai is done, or maybe
+                        # it's between steps (thinking → tool call →
+                        # final answer). Use escalating wait strategy:
+                        #   stable 1-3: wait 3s each (normal poll)
+                        #   stable 4: wait 30s then check (1st fallback)
+                        #   stable 5: wait 30s then check (2nd fallback)
+                        #   stable 6: truly done
                         stable_count += 1
-                        if stable_count >= 3:
+                        if stable_count >= 6:
                             log(profile_id, f"response complete ({len(current_text)} chars, stable {stable_count} polls)")
                             if core and from_id:
                                 try:
@@ -794,13 +800,101 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 except Exception as e:
                                     log(profile_id, f"stream_end error: {e}")
                             break
-                        # Still stable but not enough — show status
+                        elif stable_count == 4:
+                            # 1st fallback: wait 30s, then re-check
+                            log(profile_id, f"stable {stable_count}, waiting 30s before re-check (1st fallback)...")
+                            if core and from_id:
+                                try:
+                                    await core.send_stream_chunk(from_id, "thinking",
+                                        f"z.ai 执行中... 等待 30 秒确认 ({len(current_text)} 字)")
+                                except Exception:
+                                    pass
+                            await asyncio.sleep(30)
+                            # Re-check z.ai output
+                            recheck = await zai_eval(session, agent_base, """(function(){
+                                var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                                var asst = [];
+                                for (var s = 0; s < sels.length; s++) {
+                                    var f = document.querySelectorAll(sels[s]);
+                                    for (var i = 0; i < f.length; i++) asst.push(f[i]);
+                                }
+                                var seen = {};
+                                asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+                                if (asst.length === 0) return JSON.stringify({stage:'waiting'});
+                                var last = asst[asst.length-1];
+                                var ft = (last.innerText || '').trim();
+                                var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+                                if (!ce) { var ds = last.querySelectorAll('div');
+                                    for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
+                                    if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
+                                var r = ce ? (ce.innerText||'').trim() : ft;
+                                if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
+                                return JSON.stringify({stage:'loading'});
+                            })()""")
+                            if isinstance(recheck, str):
+                                try: recheck = json.loads(recheck)
+                                except: pass
+                            if isinstance(recheck, dict):
+                                rtext = recheck.get("response", "")
+                                if rtext and rtext != current_text:
+                                    # New content after 30s! z.ai was still working.
+                                    log(profile_id, f"new content after 30s! ({len(rtext)} chars, was {len(current_text)})")
+                                    if core and from_id:
+                                        try:
+                                            await core.send_stream_chunk(from_id, "text", rtext)
+                                        except: pass
+                                    last_sent_text = rtext
+                                    stable_count = 0
+                                    continue  # go back to normal polling
+                        elif stable_count == 5:
+                            # 2nd fallback: wait 30s more, then re-check
+                            log(profile_id, f"stable {stable_count}, waiting 30s before re-check (2nd fallback)...")
+                            if core and from_id:
+                                try:
+                                    await core.send_stream_chunk(from_id, "thinking",
+                                        f"z.ai 执行中... 最后确认 ({len(current_text)} 字)")
+                                except: pass
+                            await asyncio.sleep(30)
+                            recheck = await zai_eval(session, agent_base, """(function(){
+                                var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                                var asst = [];
+                                for (var s = 0; s < sels.length; s++) {
+                                    var f = document.querySelectorAll(sels[s]);
+                                    for (var i = 0; i < f.length; i++) asst.push(f[i]);
+                                }
+                                var seen = {};
+                                asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+                                if (asst.length === 0) return JSON.stringify({stage:'waiting'});
+                                var last = asst[asst.length-1];
+                                var ft = (last.innerText || '').trim();
+                                var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+                                if (!ce) { var ds = last.querySelectorAll('div');
+                                    for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
+                                    if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
+                                var r = ce ? (ce.innerText||'').trim() : ft;
+                                if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
+                                return JSON.stringify({stage:'loading'});
+                            })()""")
+                            if isinstance(recheck, str):
+                                try: recheck = json.loads(recheck)
+                                except: pass
+                            if isinstance(recheck, dict):
+                                rtext = recheck.get("response", "")
+                                if rtext and rtext != current_text:
+                                    log(profile_id, f"new content after 2nd 30s! ({len(rtext)} chars)")
+                                    if core and from_id:
+                                        try:
+                                            await core.send_stream_chunk(from_id, "text", rtext)
+                                        except: pass
+                                    last_sent_text = rtext
+                                    stable_count = 0
+                                    continue
+                        # Normal stable (1-3): show status
                         if core and from_id:
                             try:
                                 await core.send_stream_chunk(from_id, "thinking",
                                     f"z.ai 执行中... ({len(current_text)} 字)")
-                            except Exception:
-                                pass
+                            except: pass
                 elif stage == "waiting" or stage == "loading":
                     if core and from_id:
                         try:
