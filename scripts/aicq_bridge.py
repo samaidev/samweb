@@ -662,33 +662,163 @@ async def run_bridge(profile_id, agent_port, db_path):
                 await core.send_message(from_id, f"发送失败: {send_result}")
                 continue
 
-            # Update AICQ status bar: waiting for z.ai response
+            # Stream z.ai's response to AICQ in real-time.
+            # Poll z.ai every 3s, send new text as stream chunks.
+            # Finish when z.ai's output hasn't changed for 3 consecutive
+            # polls (9 seconds of stability).
+            last_sent_text = ""
+            stable_count = 0
+            max_polls = 100  # 100 × 3s = 5 min max
+
             if core and from_id:
                 try:
                     await core.send_stream_chunk(from_id, "thinking", "正在等待 z.ai 响应...")
                 except Exception:
                     pass
 
-            # Wait for response (poll every 3s, max 180s)
-            response = await zai_wait_for_response(session, agent_base, profile_id, core=core, from_id=from_id)
-            log(profile_id, f"z.ai response: {str(response)[:80]}...")
-
-            # Send response back via AICQ as a stream (so the status bar
-            # is properly cleared and the message renders correctly).
-            # 1. Send the response text as a stream chunk
-            # 2. End the stream (this hides the status bar + finalizes msg)
-            if core and from_id:
-                try:
-                    await core.send_stream_chunk(from_id, "text", str(response))
-                    await core.send_stream_end(from_id)
-                    log(profile_id, f"response streamed to {from_id}")
-                except Exception as e:
-                    log(profile_id, f"stream send failed ({e}), falling back to send_message")
+            for poll in range(max_polls):
+                # Check if user cancelled
+                if core and from_id:
                     try:
-                        await core.send_message(from_id, str(response))
-                        log(profile_id, f"response sent to {from_id}")
-                    except Exception as e2:
-                        log(profile_id, f"send_message error: {e2}")
+                        if await core.is_stream_cancelled(from_id):
+                            log(profile_id, "stream cancelled by user")
+                            await core.clear_stream_cancel(from_id)
+                            # Click z.ai stop button
+                            await zai_eval(session, agent_base, """(function(){
+                                var btns = document.querySelectorAll('button');
+                                for (var i = 0; i < btns.length; i++) {
+                                    var b = btns[i];
+                                    var t = (b.innerText || '').trim();
+                                    var r = b.getBoundingClientRect();
+                                    if (r.width > 0 && r.height > 0 &&
+                                        (t === '停止' || t === 'Stop' || t === '停止生成')) {
+                                        b.click(); return 'stopped';
+                                    }
+                                }
+                                return 'no_stop_btn';
+                            })()""")
+                            if last_sent_text:
+                                await core.send_stream_chunk(from_id, "text",
+                                    last_sent_text + "\n\n*[已停止]*")
+                            else:
+                                await core.send_stream_chunk(from_id, "text", "*[已停止]*")
+                            await core.send_stream_end(from_id)
+                            log(profile_id, "cancelled response sent")
+                            break
+                    except Exception:
+                        pass
+
+                # Get current z.ai response text
+                result = await zai_eval(session, agent_base, """(function(){
+                    var sels = [
+                        '[class*="chat-assistant"]',
+                        '[class*="assistant-message"]',
+                        '[class*="agent-message"]',
+                        '[class*="markdown-prose"]',
+                        '[class*="prose"]'
+                    ];
+                    var asst = [];
+                    for (var s = 0; s < sels.length; s++) {
+                        var f = document.querySelectorAll(sels[s]);
+                        for (var i = 0; i < f.length; i++) asst.push(f[i]);
+                    }
+                    var seen = {};
+                    asst = asst.filter(function(el){
+                        var k = el.outerHTML.slice(0,200);
+                        if (seen[k]) return false;
+                        seen[k] = true;
+                        return true;
+                    });
+                    if (asst.length === 0) return JSON.stringify({stage:'waiting'});
+                    var last = asst[asst.length-1];
+                    var ft = (last.innerText || '').trim();
+                    if (/回复内容为空|请稍后重试|限制沙箱|当前模型使用人数较多/.test(ft))
+                        return JSON.stringify({stage:'error', error: ft.slice(0,200)});
+                    var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+                    if (!ce) {
+                        var ds = last.querySelectorAll('div');
+                        for (var i = ds.length-1; i >= 0; i--) {
+                            var d = ds[i];
+                            var c = (d.className || '').toString();
+                            if (!/thinking|reasoning|action|toolCallTrace/i.test(c) && d.innerText.trim().length > 50) {
+                                ce = d; break;
+                            }
+                        }
+                    }
+                    var r = ce ? (ce.innerText || '').trim() : ft;
+                    if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
+                    return JSON.stringify({stage:'loading'});
+                })()""")
+
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except Exception:
+                        pass
+                if not isinstance(result, dict):
+                    result = {}
+
+                stage = result.get("stage", "")
+                current_text = result.get("response", "")
+
+                if stage == "error":
+                    error_msg = result.get("error", "unknown")
+                    log(profile_id, f"z.ai error: {error_msg}")
+                    if core and from_id:
+                        await core.send_stream_chunk(from_id, "text", f"❌ {error_msg}")
+                        await core.send_stream_end(from_id)
+                    break
+
+                if stage == "responding" and current_text:
+                    # Send new/updated text as a stream chunk
+                    if current_text != last_sent_text:
+                        # Send the full current text (aicq.me replaces the
+                        # streaming text, not appends)
+                        if core and from_id:
+                            try:
+                                await core.send_stream_chunk(from_id, "text", current_text)
+                            except Exception:
+                                pass
+                        last_sent_text = current_text
+                        stable_count = 0
+                        log(profile_id, f"streaming... ({len(current_text)} chars)")
+                    else:
+                        # Text unchanged — maybe z.ai is done
+                        stable_count += 1
+                        if stable_count >= 3:
+                            log(profile_id, f"response complete ({len(current_text)} chars, stable {stable_count} polls)")
+                            if core and from_id:
+                                try:
+                                    await core.send_stream_end(from_id)
+                                    log(profile_id, f"response streamed to {from_id}")
+                                except Exception as e:
+                                    log(profile_id, f"stream_end error: {e}")
+                            break
+                        # Still stable but not enough — show status
+                        if core and from_id:
+                            try:
+                                await core.send_stream_chunk(from_id, "thinking",
+                                    f"z.ai 执行中... ({len(current_text)} 字)")
+                            except Exception:
+                                pass
+                elif stage == "waiting" or stage == "loading":
+                    if core and from_id:
+                        try:
+                            await core.send_stream_chunk(from_id, "thinking", "正在等待 z.ai 响应...")
+                        except Exception:
+                            pass
+
+                await asyncio.sleep(3)
+            else:
+                # Max polls reached
+                log(profile_id, f"max polls reached, sending final response ({len(last_sent_text)} chars)")
+                if core and from_id:
+                    try:
+                        if last_sent_text:
+                            await core.send_stream_chunk(from_id, "text", last_sent_text)
+                        await core.send_stream_end(from_id)
+                    except Exception:
+                        pass
     finally:
         await session.close()
 
