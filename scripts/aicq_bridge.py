@@ -28,11 +28,42 @@ import asyncio
 import base64
 import json
 import os
+import random
 import re
 import sys
 import time
 
 import aiohttp
+
+# 20 greeting messages (~30 chars each) for bypassing z.ai usage limits.
+# When z.ai shows "用量限制", we delete all chats, send a random greeting,
+# wait for a normal reply, then delete chats again and send the real message.
+GREETINGS = [
+    "你好，今天天气怎么样？",
+    "嗨，最近有什么有趣的事吗？",
+    "你好，能推荐一本书吗？",
+    "你好，今天过得怎么样？",
+    "嗨，最近有什么好看的剧？",
+    "你好，能帮我出个主意吗？",
+    "你好，今天心情不太好，能陪我聊聊吗？",
+    "嗨，你有什么拿手菜推荐？",
+    "你好，最近有什么好玩的游戏？",
+    "你好，能给我讲个笑话吗？",
+    "嗨，今天学到了什么新知识？",
+    "你好，有什么好看的纪录片推荐？",
+    "你好，最近有什么科技新闻？",
+    "嗨，你觉得人工智能未来会怎样？",
+    "你好，今天有什么值得开心的事？",
+    "你好，最近睡眠质量不太好，怎么办？",
+    "嗨，有什么提高效率的小技巧？",
+    "你好，最近有什么新出的电影？",
+    "你好，你觉得养猫还是养狗好？",
+    "嗨，今天有什么美好的发现吗？",
+]
+
+# Keywords that indicate z.ai usage limit / rate limit error
+LIMIT_KEYWORDS = ["用量限制", "使用限制", "额度", "请求过于频繁", "rate limit",
+                  "使用次数", "今日额度", "限制沙箱", "用量已达"]
 
 sys.path.insert(0, os.path.expanduser(
     "~/AppData/Local/Programs/Python/Python313/Lib/site-packages"))
@@ -254,6 +285,149 @@ async def zai_new_chat(session, agent_base, profile_id):
         chat_id = state.split("/c/")[-1].split("/")[0].split("?")[0]
     log(profile_id, f"new chat_id: {chat_id}")
     return chat_id
+
+
+async def zai_dismiss_usage_limit_popup(session, agent_base, profile_id):
+    """Check if z.ai is showing a usage limit popup. If so, click '好的'
+    to dismiss it. Returns True if a popup was found and dismissed."""
+    result = await zai_eval(session, agent_base, """(function(){
+        var modals = document.querySelectorAll('[class*="modal"], [role="dialog"]');
+        for (var i = 0; i < modals.length; i++) {
+            var el = modals[i];
+            var text = el.innerText || '';
+            if (text.indexOf('用量') >= 0 || text.indexOf('限制') >= 0 ||
+                text.indexOf('额度') >= 0 || text.indexOf('次数') >= 0) {
+                var btns = el.querySelectorAll('button');
+                for (var j = 0; j < btns.length; j++) {
+                    var t = (btns[j].innerText || '').trim();
+                    if (t === '好的' || t === '确定' || t === 'OK' || t === '知道了') {
+                        btns[j].click();
+                        return 'dismissed';
+                    }
+                }
+                return 'found_but_no_btn';
+            }
+        }
+        return 'no_popup';
+    })()""")
+    if result == 'dismissed':
+        log(profile_id, "usage limit popup dismissed (clicked 好的)")
+        await asyncio.sleep(1)
+        return True
+    return False
+
+
+def is_usage_limit_error(text):
+    """Check if the response text indicates a usage limit error."""
+    if not text:
+        return False
+    text_lower = text.lower()
+    for kw in LIMIT_KEYWORDS:
+        if kw in text or kw.lower() in text_lower:
+            return True
+    return False
+
+
+async def zai_bypass_usage_limit(session, agent_base, profile_id, core, from_id, original_message):
+    """Bypass z.ai usage limit by:
+    1. Click '好的' to dismiss the limit popup
+    2. Delete all chats
+    3. Send a random greeting
+    4. Wait for a normal reply (confirms limit is cleared)
+    5. Delete all chats again
+    6. Return True if bypass succeeded, False otherwise
+
+    The caller should then re-send the original message.
+    """
+    log(profile_id, "usage limit detected — starting bypass procedure")
+
+    # Step 1: Dismiss popup
+    await zai_dismiss_usage_limit_popup(session, agent_base, profile_id)
+
+    # Step 2: Delete all chats
+    log(profile_id, "bypass: deleting all chats")
+    await zai_delete_all_chats(session, agent_base, profile_id)
+
+    # Step 3: Send a random greeting
+    greeting = random.choice(GREETINGS)
+    log(profile_id, f"bypass: sending greeting: {greeting}")
+    if core and from_id:
+        try:
+            await core.send_stream_chunk(from_id, "thinking", "正在处理用量限制，请稍候...")
+        except Exception:
+            pass
+
+    # Create new chat + type + send greeting
+    await zai_new_chat(session, agent_base, profile_id)
+    ok, _ = await zai_type_and_send(session, agent_base, profile_id, greeting)
+    if not ok:
+        log(profile_id, "bypass: failed to send greeting")
+        return False
+
+    # Step 4: Wait for a normal reply (poll up to 60s)
+    log(profile_id, "bypass: waiting for greeting reply...")
+    greeting_response = ""
+    stable_count = 0
+    for attempt in range(20):
+        await asyncio.sleep(3)
+        result = await zai_eval(session, agent_base, """(function(){
+            var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+            var asst = [];
+            for (var s = 0; s < sels.length; s++) {
+                var f = document.querySelectorAll(sels[s]);
+                for (var i = 0; i < f.length; i++) asst.push(f[i]);
+            }
+            var seen = {};
+            asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+            if (asst.length === 0) return JSON.stringify({stage:'waiting'});
+            var last = asst[asst.length-1];
+            var ft = (last.innerText || '').trim();
+            var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+            if (!ce) { var ds = last.querySelectorAll('div');
+                for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
+                if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
+            var r = ce ? (ce.innerText||'').trim() : ft;
+            if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
+            return JSON.stringify({stage:'loading'});
+        })()""")
+        if isinstance(result, str):
+            try: result = json.loads(result)
+            except: pass
+        if isinstance(result, dict) and result.get("stage") == "responding":
+            resp = result.get("response", "")
+            if resp == greeting_response:
+                stable_count += 1
+                if stable_count >= 2:
+                    # Check if this is also a limit error
+                    if is_usage_limit_error(resp):
+                        log(profile_id, "bypass: greeting also hit limit, trying again with different greeting")
+                        # Delete + try another greeting
+                        await zai_dismiss_usage_limit_popup(session, agent_base, profile_id)
+                        await zai_delete_all_chats(session, agent_base, profile_id)
+                        greeting = random.choice(GREETINGS)
+                        log(profile_id, f"bypass: retry with: {greeting}")
+                        await zai_new_chat(session, agent_base, profile_id)
+                        await zai_type_and_send(session, agent_base, profile_id, greeting)
+                        greeting_response = ""
+                        stable_count = 0
+                        continue
+                    else:
+                        log(profile_id, f"bypass: got normal reply ({len(resp)} chars), limit cleared!")
+                        break
+            else:
+                greeting_response = resp
+                stable_count = 0
+    else:
+        log(profile_id, "bypass: timeout waiting for greeting reply")
+        return False
+
+    # Step 5: Delete all chats again
+    log(profile_id, "bypass: deleting chats after greeting reply")
+    await zai_delete_all_chats(session, agent_base, profile_id)
+    await zai_new_chat(session, agent_base, profile_id)
+
+    log(profile_id, "bypass: complete, ready to re-send original message")
+    return True
 
 
 async def zai_dismiss_high_traffic_popup(session, agent_base, profile_id):
@@ -764,10 +938,33 @@ async def run_bridge(profile_id, agent_port, db_path):
                 if stage == "error":
                     error_msg = result.get("error", "unknown")
                     log(profile_id, f"z.ai error: {error_msg}")
-                    if core and from_id:
-                        await core.send_stream_chunk(from_id, "text", f"❌ {error_msg}")
-                        await core.send_stream_end(from_id)
-                    break
+                    # Check if this is a usage limit error
+                    if is_usage_limit_error(error_msg) or is_usage_limit_error(last_sent_text):
+                        # Bypass: dismiss popup, delete chats, send greeting,
+                        # wait for reply, delete chats, then re-send original
+                        bypass_ok = await zai_bypass_usage_limit(
+                            session, agent_base, profile_id, core, from_id, content)
+                        if bypass_ok:
+                            # Re-send the original message
+                            log(profile_id, "bypass succeeded, re-sending original message")
+                            ok2, _ = await zai_type_and_send(
+                                session, agent_base, profile_id, content, core, from_id)
+                            if ok2:
+                                # Reset streaming state and continue polling
+                                last_sent_text = ""
+                                stable_count = 0
+                                continue
+                        else:
+                            if core and from_id:
+                                await core.send_stream_chunk(from_id, "text",
+                                    "❌ 用量限制，自动绕过失败，请稍后重试")
+                                await core.send_stream_end(from_id)
+                            break
+                    else:
+                        if core and from_id:
+                            await core.send_stream_chunk(from_id, "text", f"❌ {error_msg}")
+                            await core.send_stream_end(from_id)
+                        break
 
                 if stage == "responding" and current_text:
                     # Send new/updated text as a stream chunk
@@ -792,14 +989,35 @@ async def run_bridge(profile_id, agent_port, db_path):
                         #   stable 6: truly done
                         stable_count += 1
                         if stable_count >= 6:
-                            log(profile_id, f"response complete ({len(current_text)} chars, stable {stable_count} polls)")
-                            if core and from_id:
-                                try:
-                                    await core.send_stream_end(from_id)
-                                    log(profile_id, f"response streamed to {from_id}")
-                                except Exception as e:
-                                    log(profile_id, f"stream_end error: {e}")
-                            break
+                            # Check if the final response is actually a
+                            # usage limit error (short error text)
+                            if is_usage_limit_error(current_text):
+                                log(profile_id, f"usage limit in response: {current_text[:60]}")
+                                bypass_ok = await zai_bypass_usage_limit(
+                                    session, agent_base, profile_id, core, from_id, content)
+                                if bypass_ok:
+                                    log(profile_id, "bypass succeeded, re-sending original message")
+                                    ok2, _ = await zai_type_and_send(
+                                        session, agent_base, profile_id, content, core, from_id)
+                                    if ok2:
+                                        last_sent_text = ""
+                                        stable_count = 0
+                                        continue
+                                else:
+                                    if core and from_id:
+                                        await core.send_stream_chunk(from_id, "text",
+                                            "❌ 用量限制，自动绕过失败，请稍后重试")
+                                        await core.send_stream_end(from_id)
+                                    break
+                            else:
+                                log(profile_id, f"response complete ({len(current_text)} chars, stable {stable_count} polls)")
+                                if core and from_id:
+                                    try:
+                                        await core.send_stream_end(from_id)
+                                        log(profile_id, f"response streamed to {from_id}")
+                                    except Exception as e:
+                                        log(profile_id, f"stream_end error: {e}")
+                                break
                         elif stable_count == 4:
                             # 1st fallback: wait 30s, then re-check
                             log(profile_id, f"stable {stable_count}, waiting 30s before re-check (1st fallback)...")
