@@ -116,35 +116,40 @@ function bindEvents() {
       if (t) el.omnibox.value = displayURL(t.url);
       el.omnibox.blur();
     } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      moveSuggestionSelection(1);
+      if (_suggestionState.items.length > 0) {
+        e.preventDefault();
+        moveSuggestionSelection(1);
+      }
     } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      moveSuggestionSelection(-1);
+      if (_suggestionState.items.length > 0) {
+        e.preventDefault();
+        moveSuggestionSelection(-1);
+      }
     } else if (e.key === 'Tab') {
-      // Tab on a suggestion completes the omnibox with that URL
       const sel = getSelectedSuggestion();
       if (sel && sel.url) {
         e.preventDefault();
         el.omnibox.value = sel.url;
-        renderSuggestions(el.omnibox.value);
+        _userTyped = sel.url;
+        hideSuggestions();
       }
     }
   });
-  el.omnibox.addEventListener('input', () => renderSuggestions(el.omnibox.value));
+  el.omnibox.addEventListener('input', () => {
+    _userTyped = el.omnibox.value;
+    renderSuggestions(el.omnibox.value, /*autofill=*/true);
+  });
   el.omnibox.addEventListener('focus', () => {
     el.omnibox.select();
-    // Show suggestions on focus if there's history
     if (!el.omnibox.value) {
-      renderSuggestions('');
+      _userTyped = '';
+      renderSuggestions('', /*autofill=*/false);
     }
   });
   el.omnibox.addEventListener('blur', () => {
-    // Delay hiding so click on suggestion registers first
     setTimeout(() => hideSuggestions(), 180);
   });
   el.omnibox.addEventListener('mousedown', (e) => {
-    // Single-click anywhere in the omnibox selects all, Chrome-style.
     if (document.activeElement !== el.omnibox) {
       e.preventDefault();
       el.omnibox.focus();
@@ -453,6 +458,7 @@ async function openDirect() {
 // (bypassing the iframe, useful for z.ai login).
 
 let _suggestionState = { items: [], selectedIdx: -1 };
+let _userTyped = '';  // what the user actually typed (before autocomplete)
 
 function buildSuggestions(query) {
   const q = query.trim().toLowerCase();
@@ -501,7 +507,7 @@ function buildSuggestions(query) {
   return out.slice(0, 10);
 }
 
-function renderSuggestions(query) {
+function renderSuggestions(query, autofill) {
   const items = buildSuggestions(query);
   _suggestionState.items = items;
   _suggestionState.selectedIdx = -1;
@@ -511,17 +517,26 @@ function renderSuggestions(query) {
     return;
   }
 
+  // Position the dropdown aligned to the start of the omnibox input text
+  // (after the search icon). Use iconRect.right relative to wrap's left.
+  const iconRect = el.omniboxIcon.getBoundingClientRect();
+  const wrapRect = el.omniboxWrap.getBoundingClientRect();
+  const leftOffset = iconRect.right - wrapRect.left;
+  el.omniboxSuggestions.style.left = leftOffset + 'px';
+  el.omniboxSuggestions.style.right = 'auto';
+
+  const q = query.trim().toLowerCase();
   const html = items.map((item, i) => {
     const iconSvg = item.source === 'bookmark'
       ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>'
       : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>';
-    // If the item has a title, show title as primary + url as secondary.
-    // If no title (history-only), just show the URL as primary.
     const titleOrUrl = item.title || item.url;
+    // Highlight the portion of the text that matches the query.
+    const highlighted = highlightMatch(titleOrUrl, q);
     const urlPart = item.title ? `<span class="sug-url">${escapeHtml(item.url)}</span>` : '';
     return `<div class="omnibox-suggestion" data-idx="${i}" data-url="${escapeAttr(item.url)}">
       <span class="sug-icon">${iconSvg}</span>
-      <span class="sug-text">${escapeHtml(titleOrUrl)}</span>
+      <span class="sug-text">${highlighted}</span>
       ${urlPart}
     </div>`;
   }).join('');
@@ -531,20 +546,49 @@ function renderSuggestions(query) {
   // Attach click handlers
   el.omniboxSuggestions.querySelectorAll('.omnibox-suggestion').forEach(node => {
     node.addEventListener('mousedown', (e) => {
-      e.preventDefault(); // keep omnibox focused
+      e.preventDefault();
       const idx = parseInt(node.dataset.idx, 10);
       if (!isNaN(idx) && _suggestionState.items[idx]) {
-        // Left click = normal navigate; middle click (button===1) = direct open
         navigateToSuggestion(_suggestionState.items[idx], /*direct=*/e.button === 1 || e.shiftKey);
       }
     });
     node.addEventListener('contextmenu', (e) => e.preventDefault());
   });
+
+  // Autofill (Chrome-style inline autocomplete): if the first suggestion's
+  // URL starts with the user's query (case-insensitive), complete the
+  // omnibox with the full URL and select the suffix the user didn't type.
+  // E.g. user types "htt" → omnibox becomes "https://chat.z.ai" with
+  // "ps://chat.z.ai" selected. Only triggers when the query is an actual
+  // prefix of the URL (so "z" won't autofill "https://chat.z.ai").
+  if (autofill && query && items.length > 0) {
+    const first = items[0];
+    const qLow = query.toLowerCase();
+    const urlLow = first.url.toLowerCase();
+    if (urlLow.startsWith(qLow) && first.url.length > query.length) {
+      el.omnibox.value = first.url;
+      el.omnibox.setSelectionRange(query.length, first.url.length);
+      _suggestionState.selectedIdx = 0;
+      const firstNode = el.omniboxSuggestions.querySelector('.omnibox-suggestion[data-idx="0"]');
+      if (firstNode) firstNode.classList.add('selected');
+    }
+  }
+}
+
+function highlightMatch(text, query) {
+  if (!query) return escapeHtml(text);
+  const low = text.toLowerCase();
+  const idx = low.indexOf(query);
+  if (idx < 0) return escapeHtml(text);
+  return escapeHtml(text.slice(0, idx)) +
+         '<span class="sug-match">' + escapeHtml(text.slice(idx, idx + query.length)) + '</span>' +
+         escapeHtml(text.slice(idx + query.length));
 }
 
 function hideSuggestions() {
   el.omniboxSuggestions.classList.add('hidden');
   el.omniboxSuggestions.innerHTML = '';
+  el.omniboxSuggestions.style.left = '';
   _suggestionState.items = [];
   _suggestionState.selectedIdx = -1;
 }
@@ -556,16 +600,33 @@ function getSelectedSuggestion() {
 
 function moveSuggestionSelection(delta) {
   if (_suggestionState.items.length === 0) return;
+  // Save the user's typed text so we can restore it when navigating
+  // away from the autocompleted entry.
+  if (_suggestionState.selectedIdx === -1 || _suggestionState.selectedIdx === 0) {
+    // about to move away from the autofill entry — restore user's text
+    if (_userTyped && el.omnibox.value !== _userTyped) {
+      el.omnibox.value = _userTyped;
+    }
+  }
   _suggestionState.selectedIdx += delta;
-  if (_suggestionState.selectedIdx < 0) _suggestionState.selectedIdx = _suggestionState.items.length - 1;
-  if (_suggestionState.selectedIdx >= _suggestionState.items.length) _suggestionState.selectedIdx = 0;
-  // Update DOM
+  if (_suggestionState.selectedIdx < -1) _suggestionState.selectedIdx = _suggestionState.items.length - 1;
+  if (_suggestionState.selectedIdx >= _suggestionState.items.length) _suggestionState.selectedIdx = -1;
+
+  // Update DOM + omnibox value
   el.omniboxSuggestions.querySelectorAll('.omnibox-suggestion').forEach((node, i) => {
     node.classList.toggle('selected', i === _suggestionState.selectedIdx);
-    if (i === _suggestionState.selectedIdx) {
-      node.scrollIntoView({ block: 'nearest' });
-    }
   });
+  if (_suggestionState.selectedIdx === -1) {
+    // Restored to user's original text
+    el.omnibox.value = _userTyped;
+    el.omnibox.setSelectionRange(_userTyped.length, _userTyped.length);
+  } else {
+    const sel = _suggestionState.items[_suggestionState.selectedIdx];
+    el.omnibox.value = sel.url;
+    el.omnibox.select();
+    const node = el.omniboxSuggestions.querySelector(`.omnibox-suggestion[data-idx="${_suggestionState.selectedIdx}"]`);
+    if (node) node.scrollIntoView({ block: 'nearest' });
+  }
 }
 
 function navigateToSuggestion(item, direct) {
@@ -573,7 +634,6 @@ function navigateToSuggestion(item, direct) {
   el.omnibox.value = item.url;
   el.omnibox.blur();
   if (direct) {
-    // Use the "直接打开" path (bypass iframe, for z.ai etc.)
     openDirect();
   } else {
     submitOmnibox();
