@@ -214,16 +214,16 @@ body {
   overflow-y: auto;
   z-index: 1000;
   font-size: 13px;
+  min-width: 320px;
 }
 .omnibox-suggestions.hidden { display: none; }
 .omnibox-suggestion {
   display: flex;
   align-items: center;
-  padding: 8px 14px;
+  padding: 7px 14px;
   cursor: pointer;
   color: #202124;
   gap: 10px;
-  white-space: nowrap;
   overflow: hidden;
 }
 .omnibox-suggestion:hover,
@@ -238,28 +238,28 @@ body {
 }
 .omnibox-suggestion .sug-text {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .omnibox-suggestion .sug-url {
+  flex-shrink: 0;
   color: #5f6368;
   font-size: 12px;
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 40%;
+  white-space: nowrap;
 }
 .omnibox-suggestion .sug-direct {
   flex-shrink: 0;
   font-size: 11px;
   color: #1a73e8;
   background: #e8f0fe;
-  padding: 2px 6px;
+  padding: 2px 7px;
   border-radius: 4px;
-  opacity: 0;
-}
-.omnibox-suggestion:hover .sug-direct,
-.omnibox-suggestion.selected .sug-direct {
-  opacity: 1;
+  white-space: nowrap;
 }
 
 /* ===================== Content area ===================== */

@@ -515,13 +515,14 @@ function renderSuggestions(query) {
     const iconSvg = item.source === 'bookmark'
       ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>'
       : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>';
+    // If the item has a title, show title as primary + url as secondary.
+    // If no title (history-only), just show the URL as primary.
     const titleOrUrl = item.title || item.url;
     const urlPart = item.title ? `<span class="sug-url">${escapeHtml(item.url)}</span>` : '';
     return `<div class="omnibox-suggestion" data-idx="${i}" data-url="${escapeAttr(item.url)}">
       <span class="sug-icon">${iconSvg}</span>
       <span class="sug-text">${escapeHtml(titleOrUrl)}</span>
       ${urlPart}
-      <span class="sug-direct" title="Shift+Enter 用直接打开">直接打开</span>
     </div>`;
   }).join('');
   el.omniboxSuggestions.innerHTML = html;
