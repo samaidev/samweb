@@ -7,17 +7,25 @@ Connects to:
   - The profile's AICQ agent identity (in ~/.aicq-sdk/<db_file>) for
     receiving/sending messages to the owner on aicq.me.
 
-Flow:
-  1. Poll AICQ for new messages from the owner.
-  2. On new message → forward to z.ai via the tab worker's agent API
-     (type into chat input, click send, poll for response).
-  3. Send z.ai's response back to the owner via AICQ.
+Flow (on startup):
+  1. Switch z.ai to Agent mode.
+  2. Clean up all existing Agent-mode chats (delete them).
+  3. Wait for AICQ messages from the owner.
+
+Flow (on each AICQ message):
+  4. Create a new z.ai Agent-mode chat.
+  5. Type the message, click send.
+  6. Poll for z.ai's response.
+  7. Send the response back to the owner via AICQ.
+  8. Subsequent messages from the same AICQ friend continue in the same
+     z.ai chat (so context is retained). New friends get new chats.
 
 Usage:
   python aicq_bridge.py --profile qq --agent-port 55978 --db-path ~/.aicq-sdk/data.db
 """
 import argparse
 import asyncio
+import base64
 import json
 import os
 import re
@@ -26,311 +34,450 @@ import time
 
 import aiohttp
 
-# AICQ SDK is installed on shan at:
-#   C:\Users\Administrator\AppData\Local\Programs\Python\Python313\Lib\site-packages\aicq
 sys.path.insert(0, os.path.expanduser(
     "~/AppData/Local/Programs/Python/Python313/Lib/site-packages"))
 from aicq import AICQCore, AICQError
 
 SERVER = "https://aicq.me"
-POLL_INTERVAL = 5  # seconds between AICQ polls
 
 
-def log(msg):
-    """Log to stdout with timestamp + profile prefix."""
+def log(profile_id, msg):
     ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    print(f"[{ts}] [{profile_id}] {msg}", flush=True)
 
+
+# ---------- z.ai DOM automation helpers ----------
+
+async def zai_eval(session, agent_base, script, timeout=15):
+    """Run a JS eval on the tab worker's z.ai page."""
+    try:
+        resp = await session.post(f"{agent_base}/agent/eval",
+                                  json={"script": script},
+                                  timeout=aiohttp.ClientTimeout(total=timeout))
+        data = await resp.json()
+        value = data.get("value", data)
+        if isinstance(value, dict) and "value" in value:
+            value = value["value"]
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                pass
+        return value
+    except Exception as e:
+        log("?", f"zai_eval error: {e}")
+        return None
+
+
+async def zai_switch_to_agent_mode(session, agent_base, profile_id):
+    """Switch z.ai from Chat mode to Agent mode."""
+    log(profile_id, "switching to Agent mode...")
+    result = await zai_eval(session, agent_base, """(function(){
+        var all = document.querySelectorAll('div, button, a, span, li');
+        for (var i = 0; i < all.length; i++) {
+            var el = all[i]; var dt = '';
+            for (var j = 0; j < el.childNodes.length; j++) {
+                var n = el.childNodes[j]; if (n.nodeType === 3) dt += n.nodeValue;
+            }
+            dt = dt.trim();
+            if (dt === 'Agent 模式' || dt === 'Agent Mode') {
+                var r = el.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) { el.click(); return 'ok'; }
+            }
+        }
+        // Maybe already in Agent mode
+        var body = document.body ? document.body.innerText : '';
+        if (body.indexOf('Agent 模式') >= 0 && body.indexOf('Chat 模式') >= 0) {
+            return 'already_agent';
+        }
+        return 'not_found';
+    })()""")
+    log(profile_id, f"Agent mode switch: {result}")
+    await asyncio.sleep(3)
+    return result
+
+
+async def zai_delete_all_chats(session, agent_base, profile_id):
+    """Delete all existing chats in the z.ai sidebar."""
+    log(profile_id, "deleting all existing chats...")
+    deleted = 0
+    for attempt in range(50):  # max 50 chats
+        # Find the first chat item's delete/menu button
+        result = await zai_eval(session, agent_base, """(function(){
+            // z.ai chat items are typically in the sidebar with hover-triggered
+            // menu buttons. Try multiple selectors.
+            var items = document.querySelectorAll('[class*="chat-item"], [class*="conversation-item"], [class*="history-item"]');
+            if (items.length === 0) {
+                // Try finding by href pattern
+                items = document.querySelectorAll('a[href*="/c/"]');
+            }
+            if (items.length === 0) return JSON.stringify({done: true, remaining: 0});
+
+            var first = items[0];
+            // Hover to reveal menu buttons
+            first.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
+            first.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+
+            // Look for delete/menu button within or near the item
+            var menuBtn = first.querySelector('[class*="menu"], [class*="delete"], [class*="more"], button[title*="删除"], button[title*="Delete"], button[aria-label*="delete"]');
+            if (menuBtn) {
+                menuBtn.click();
+                return JSON.stringify({clicked: 'menu', remaining: items.length});
+            }
+            // Right-click for context menu
+            first.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, button: 2}));
+            return JSON.stringify({clicked: 'contextmenu', remaining: items.length, text: first.innerText.slice(0,40)});
+        })()""")
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except Exception:
+                pass
+        if not isinstance(result, dict):
+            result = {}
+
+        if result.get("done"):
+            log(profile_id, f"deleted {deleted} chats, none remaining")
+            return deleted
+
+        remaining = result.get("remaining", 0)
+        if remaining == 0:
+            log(profile_id, f"deleted {deleted} chats, none remaining")
+            return deleted
+
+        # After clicking menu/contextmenu, look for delete option
+        await asyncio.sleep(0.5)
+        del_result = await zai_eval(session, agent_base, """(function(){
+            // Look for delete option in popup menu
+            var popups = document.querySelectorAll('[class*="popup"], [class*="menu"], [class*="dropdown"], [role="menu"]');
+            for (var p of popups) {
+                var items = p.querySelectorAll('div, button, span, li');
+                for (var el of items) {
+                    var t = (el.innerText || '').trim();
+                    if (t === '删除' || t === 'Delete' || t === '删除会话') {
+                        el.click();
+                        return 'deleted';
+                    }
+                }
+            }
+            return 'no_delete_option';
+        })()""")
+        if del_result == 'deleted':
+            deleted += 1
+            # Confirm dialog if any
+            await asyncio.sleep(0.5)
+            await zai_eval(session, agent_base, """(function(){
+                var btns = document.querySelectorAll('button');
+                for (var b of btns) {
+                    var t = (b.innerText || '').trim();
+                    if (t === '确认' || t === '确定' || t === 'Confirm' || t === 'OK') {
+                        b.click(); return 'confirmed';
+                    }
+                }
+                return 'no_confirm';
+            })()""")
+            await asyncio.sleep(1)
+        else:
+            # Try keyboard shortcut: hover item + Delete key
+            log(profile_id, f"attempt {attempt}: menu click didn't find delete, trying alternative")
+            await asyncio.sleep(1)
+            # If we can't delete via menu, just move on
+            if attempt > 5:
+                log(profile_id, f"deleted {deleted} chats, stopping (can't delete more)")
+                return deleted
+
+    log(profile_id, f"deleted {deleted} chats (max attempts reached)")
+    return deleted
+
+
+async def zai_new_chat(session, agent_base, profile_id):
+    """Click '新聊天' to start a new chat. Returns the chat_id from URL."""
+    log(profile_id, "creating new chat...")
+    result = await zai_eval(session, agent_base, """(function(){
+        // Find "新聊天" button
+        var all = document.querySelectorAll('button, a, div');
+        for (var el of all) {
+            var t = (el.innerText || '').trim();
+            if (t === '新聊天' || t === 'New Chat' || t === '新建对话') {
+                var r = el.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) { el.click(); return 'clicked'; }
+            }
+        }
+        return 'not_found';
+    })()""")
+    log(profile_id, f"new chat: {result}")
+    await asyncio.sleep(3)
+
+    # Get chat_id from URL
+    state = await zai_eval(session, agent_base, "window.location.href")
+    chat_id = None
+    if isinstance(state, str) and "/c/" in state:
+        chat_id = state.split("/c/")[-1].split("/")[0].split("?")[0]
+    log(profile_id, f"new chat_id: {chat_id}")
+    return chat_id
+
+
+async def zai_type_and_send(session, agent_base, profile_id, message):
+    """Type a message into z.ai chat input and click send."""
+    # Wait for chat input
+    for attempt in range(10):
+        ready = await zai_eval(session, agent_base, """(function(){
+            var el = document.querySelector('#chat-input, textarea[class*="chat-input"], div[contenteditable="true"]');
+            return el ? 'ready' : 'not_found';
+        })()""")
+        if ready == "ready":
+            break
+        await asyncio.sleep(2)
+    else:
+        return False, "chat input not found"
+
+    # Type the message
+    await zai_eval(session, agent_base, f"""(function(){{
+        var el = document.querySelector('#chat-input, textarea[class*="chat-input"], div[contenteditable="true"]');
+        if (!el) return 'no_input';
+        if (el.contentEditable === 'true') {{
+            el.focus();
+            document.execCommand('insertText', false, {json.dumps(message)});
+            return 'typed_ce';
+        }}
+        var proto = el.tagName === 'TEXTAREA' ?
+            window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setter.call(el, {json.dumps(message)});
+        el.dispatchEvent(new InputEvent('input', {{bubbles: true, inputType: 'insertText', data: {json.dumps(message)}}}));
+        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+        return 'typed';
+    }})()""")
+    await asyncio.sleep(1)
+
+    # Click send
+    send_result = await zai_eval(session, agent_base, """(function(){
+        var sels = [
+            'button.sendMessageButton',
+            'button[class*="sendMessageButton"]',
+            'button[class*="send-button"]',
+            'button[type="submit"]',
+            'button[aria-label*="Send"]',
+            'button[aria-label*="发送"]'
+        ];
+        for (var i = 0; i < sels.length; i++) {
+            var btn = document.querySelector(sels[i]);
+            if (btn && !btn.disabled) { btn.click(); return 'sent:' + sels[i]; }
+        }
+        var input = document.querySelector('#chat-input, textarea, div[contenteditable="true"]');
+        if (input) {
+            var parent = input.closest('form, div[class*="input"], div[class*="chat"]');
+            if (parent) {
+                var btns = parent.querySelectorAll('button');
+                for (var j = 0; j < btns.length; j++) {
+                    if (!btns[j].disabled && btns[j].getBoundingClientRect().width > 0) {
+                        btns[j].click(); return 'sent:fallback_' + j;
+                    }
+                }
+            }
+        }
+        return 'no_send_btn';
+    })()""")
+    log(profile_id, f"send: {send_result}")
+    return True, send_result
+
+
+async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180):
+    """Poll for z.ai's response. Returns the response text."""
+    last_response = ""
+    stable_count = 0
+    for attempt in range(max_wait // 5):
+        result = await zai_eval(session, agent_base, """(function(){
+            var sels = [
+                '[class*="chat-assistant"]',
+                '[class*="assistant-message"]',
+                '[class*="agent-message"]',
+                '[class*="markdown-prose"]',
+                '[class*="prose"]'
+            ];
+            var asst = [];
+            for (var s = 0; s < sels.length; s++) {
+                var f = document.querySelectorAll(sels[s]);
+                for (var i = 0; i < f.length; i++) asst.push(f[i]);
+            }
+            var seen = {};
+            asst = asst.filter(function(el){
+                var k = el.outerHTML.slice(0,200);
+                if (seen[k]) return false;
+                seen[k] = true;
+                return true;
+            });
+            if (asst.length === 0) return JSON.stringify({stage:'waiting'});
+            var last = asst[asst.length-1];
+            var ft = (last.innerText || '').trim();
+            if (/回复内容为空|请稍后重试|限制沙箱|当前模型使用人数较多/.test(ft))
+                return JSON.stringify({stage:'error', error: ft.slice(0,200)});
+            var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+            if (!ce) {
+                var ds = last.querySelectorAll('div');
+                for (var i = ds.length-1; i >= 0; i--) {
+                    var d = ds[i];
+                    var c = (d.className || '').toString();
+                    if (!/thinking|reasoning|action|toolCallTrace/i.test(c) && d.innerText.trim().length > 50) {
+                        ce = d; break;
+                    }
+                }
+            }
+            var r = ce ? (ce.innerText || '').trim() : ft;
+            if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
+            return JSON.stringify({stage:'loading'});
+        })()""")
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except Exception:
+                pass
+        if isinstance(result, dict):
+            stage = result.get("stage", "")
+            if stage == "responding":
+                resp_text = result.get("response", "")
+                if resp_text == last_response:
+                    stable_count += 1
+                    if stable_count >= 3:
+                        log(profile_id, f"response ready ({len(resp_text)} chars)")
+                        return resp_text
+                else:
+                    last_response = resp_text
+                    stable_count = 0
+            elif stage == "error":
+                return f"Error: {result.get('error', 'unknown')}"
+        await asyncio.sleep(5)
+    return last_response or "(z.ai 超时未响应)"
+
+
+# ---------- AICQ connection ----------
 
 async def connect_aicq(db_path, profile_id):
-    """Connect to AICQ using the profile's db, return AICQCore + agent info."""
     core = AICQCore(db_path=db_path, server=SERVER)
     agent = core.db.get_agent()
     if not agent:
-        log(f"[{profile_id}] no agent found in {db_path}")
+        log(profile_id, f"no agent found in {db_path}")
         return None, None
-    account_id = agent.get("account_id", "")
-    log(f"[{profile_id}] AICQ agent: {account_id} ({agent.get('name','')})")
-
-    # Login
+    log(profile_id, f"AICQ agent: {agent.get('account_id','')} ({agent.get('name','')})")
     try:
         await core.login()
-        log(f"[{profile_id}] AICQ login OK")
+        log(profile_id, "AICQ login OK")
     except Exception as e:
-        log(f"[{profile_id}] AICQ login failed: {e}")
+        log(profile_id, f"AICQ login failed: {e}")
         return None, None
-
-    # Connect WebSocket for real-time message reception
     try:
         await core.connect()
-        log(f"[{profile_id}] AICQ WebSocket connected")
+        log(profile_id, "AICQ WebSocket connected")
     except Exception as e:
-        log(f"[{profile_id}] AICQ connect warning: {e}")
-
+        log(profile_id, f"AICQ connect warning: {e}")
     return core, agent
 
 
-async def forward_to_zai(agent_base, message, profile_id):
-    """Forward a message to z.ai via the tab worker's agent API.
-    Returns z.ai's response text."""
-    try:
-        timeout = aiohttp.ClientTimeout(total=300)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Check tab worker is alive
-            try:
-                async with session.get(f"{agent_base}/agent/health",
-                                       timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status != 200:
-                        return f"Error: tab worker health check failed ({resp.status})"
-            except Exception as e:
-                return f"Error: tab worker not reachable: {e}"
-
-            log(f"[{profile_id}] forwarding to z.ai: {message[:80]}...")
-
-            # z.ai should already be loaded in the tab worker (navigated
-            # on startup). Just type + send.
-
-            # Wait for chat input to be ready
-            for attempt in range(10):
-                resp = await session.post(f"{agent_base}/agent/eval", json={
-                    "script": "(function(){ var el = document.querySelector('#chat-input, textarea[class*=\"chat-input\"], div[contenteditable=\"true\"]'); return el ? 'ready' : 'not found'; })()"
-                })
-                data = await resp.json()
-                val = data.get("value", data)
-                if isinstance(val, dict):
-                    val = val.get("value", "")
-                if val == "ready":
-                    break
-                await asyncio.sleep(2)
-            else:
-                return "Error: chat input not found on z.ai page"
-
-            # Type the message
-            resp = await session.post(f"{agent_base}/agent/eval", json={
-                "script": f"""(function(){{
-                    var el = document.querySelector('#chat-input, textarea[class*="chat-input"], div[contenteditable="true"]');
-                    if (!el) return 'no input';
-                    // For contenteditable divs, use execCommand
-                    if (el.contentEditable === 'true') {{
-                        el.focus();
-                        document.execCommand('insertText', false, {json.dumps(message)});
-                        return 'typed_ce';
-                    }}
-                    // For textarea/input, use native setter
-                    var proto = el.tagName === 'TEXTAREA' ?
-                        window.HTMLTextAreaElement.prototype :
-                        window.HTMLInputElement.prototype;
-                    var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-                    setter.call(el, {json.dumps(message)});
-                    el.dispatchEvent(new InputEvent('input', {{bubbles: true, inputType: 'insertText', data: {json.dumps(message)}}}));
-                    el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                    return 'typed';
-                }})()"""
-            })
-            await asyncio.sleep(1)
-
-            # Click send button
-            resp = await session.post(f"{agent_base}/agent/eval", json={
-                "script": """(function(){
-                    // Try multiple selectors for send button
-                    var sels = [
-                        'button.sendMessageButton',
-                        'button[class*="sendMessageButton"]',
-                        'button[class*="send-button"]',
-                        'button[type="submit"]',
-                        'button[aria-label*="Send"]',
-                        'button[aria-label*="发送"]'
-                    ];
-                    for (var i = 0; i < sels.length; i++) {
-                        var btn = document.querySelector(sels[i]);
-                        if (btn && !btn.disabled) { btn.click(); return 'sent:' + sels[i]; }
-                    }
-                    // Fallback: find any button near the input
-                    var input = document.querySelector('#chat-input, textarea, div[contenteditable="true"]');
-                    if (input) {
-                        var parent = input.closest('form, div[class*="input"], div[class*="chat"]');
-                        if (parent) {
-                            var btns = parent.querySelectorAll('button');
-                            for (var j = 0; j < btns.length; j++) {
-                                if (!btns[j].disabled && btns[j].getBoundingClientRect().width > 0) {
-                                    btns[j].click();
-                                    return 'sent:fallback_' + j;
-                                }
-                            }
-                        }
-                    }
-                    return 'no_send_btn';
-                })()"""
-            })
-            data = await resp.json()
-            val = data.get("value", data)
-            if isinstance(val, dict):
-                val = val.get("value", "")
-            log(f"[{profile_id}] send result: {val}")
-
-            # Poll for response (max 3 min)
-            last_response = ""
-            stable_count = 0
-            for attempt in range(36):
-                resp = await session.post(f"{agent_base}/agent/eval", json={
-                    "script": """(function(){
-                        var sels = [
-                            '[class*="chat-assistant"]',
-                            '[class*="assistant-message"]',
-                            '[class*="agent-message"]',
-                            '[class*="markdown-prose"]',
-                            '[class*="prose"]'
-                        ];
-                        var asst = [];
-                        for (var s = 0; s < sels.length; s++) {
-                            var f = document.querySelectorAll(sels[s]);
-                            for (var i = 0; i < f.length; i++) asst.push(f[i]);
-                        }
-                        var seen = {};
-                        asst = asst.filter(function(el){
-                            var k = el.outerHTML.slice(0,200);
-                            if (seen[k]) return false;
-                            seen[k] = true;
-                            return true;
-                        });
-                        if (asst.length === 0) return JSON.stringify({stage:'waiting'});
-                        var last = asst[asst.length-1];
-                        var ft = (last.innerText || '').trim();
-                        if (/回复内容为空|请稍后重试|限制沙箱|当前模型使用人数较多/.test(ft))
-                            return JSON.stringify({stage:'error', error: ft.slice(0,200)});
-                        var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
-                        if (!ce) {
-                            var ds = last.querySelectorAll('div');
-                            for (var i = ds.length-1; i >= 0; i--) {
-                                var d = ds[i];
-                                var c = (d.className || '').toString();
-                                if (!/thinking|reasoning|action|toolCallTrace/i.test(c) && d.innerText.trim().length > 50) {
-                                    ce = d;
-                                    break;
-                                }
-                            }
-                        }
-                        var r = ce ? (ce.innerText || '').trim() : ft;
-                        if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
-                        return JSON.stringify({stage:'loading'});
-                    })()"""
-                })
-                data = await resp.json()
-                value = data.get("value", data)
-                if isinstance(value, dict) and "value" in value:
-                    value = value["value"]
-                if isinstance(value, str):
-                    try:
-                        value = json.loads(value)
-                    except Exception:
-                        pass
-                if isinstance(value, dict):
-                    stage = value.get("stage", "")
-                    if stage == "responding":
-                        resp_text = value.get("response", "")
-                        if resp_text == last_response:
-                            stable_count += 1
-                            if stable_count >= 3:
-                                log(f"[{profile_id}] response stable ({len(resp_text)} chars)")
-                                return resp_text
-                        else:
-                            last_response = resp_text
-                            stable_count = 0
-                    elif stage == "error":
-                        return f"Error: {value.get('error', 'unknown')}"
-                await asyncio.sleep(5)
-
-            return last_response or "(z.ai 超时未响应)"
-    except Exception as e:
-        return f"Error: {e}"
-
+# ---------- Main bridge ----------
 
 async def run_bridge(profile_id, agent_port, db_path):
-    """Main bridge loop for one profile."""
     agent_base = f"http://127.0.0.1:{agent_port}"
-
-    log(f"[{profile_id}] starting bridge: agent_port={agent_port} db={db_path}")
+    log(profile_id, f"starting bridge: agent_port={agent_port} db={db_path}")
 
     # Connect AICQ
     core, agent = await connect_aicq(db_path, profile_id)
     if not core:
-        log(f"[{profile_id}] failed to connect AICQ, exiting")
         return
 
-    # Set up message handler
-    message_queue = asyncio.Queue()
+    # Connect to tab worker's agent API
+    timeout = aiohttp.ClientTimeout(total=300)
+    session = aiohttp.ClientSession(timeout=timeout)
 
-    async def on_message(msg):
-        """Called when a message arrives from AICQ."""
-        try:
-            from_id = msg.get("from_id", msg.get("from", ""))
-            content = msg.get("content", "")
-            # Skip our own messages (from AI agents)
-            if from_id and from_id.startswith("ai_"):
-                return
-            # Strip HTML
-            clean = re.sub(r'<[^>]+>', '', content).strip()
-            if not clean:
-                return
-            await message_queue.put({"from": from_id, "content": clean})
-        except Exception as e:
-            log(f"[{profile_id}] on_message error: {e}")
-
-    # Register message handler
     try:
-        core.on_message(on_message)
-    except Exception as e:
-        log(f"[{profile_id}] on_message registration warning: {e}")
+        # Step 1: Switch to Agent mode
+        await zai_switch_to_agent_mode(session, agent_base, profile_id)
 
-    # Process messages
-    log(f"[{profile_id}] bridge ready, waiting for messages...")
+        # Step 2: Delete all existing chats
+        await zai_delete_all_chats(session, agent_base, profile_id)
 
-    while True:
-        try:
-            msg = await asyncio.wait_for(message_queue.get(), timeout=60)
-        except asyncio.TimeoutError:
-            # Periodic health check
+        # Step 3: Set up message queue + handler
+        message_queue = asyncio.Queue()
+        # Map: AICQ friend_id → z.ai chat_id (for context retention)
+        chat_map = {}
+
+        async def on_message(msg):
             try:
-                async with aiohttp.ClientSession() as session:
+                from_id = msg.get("from_id", msg.get("from", ""))
+                content = msg.get("content", "")
+                if from_id and from_id.startswith("ai_"):
+                    return
+                clean = re.sub(r'<[^>]+>', '', content).strip()
+                if not clean:
+                    return
+                await message_queue.put({"from": from_id, "content": clean})
+            except Exception as e:
+                log(profile_id, f"on_message error: {e}")
+
+        try:
+            core.on_message(on_message)
+        except Exception as e:
+            log(profile_id, f"on_message registration warning: {e}")
+
+        log(profile_id, "bridge ready, waiting for AICQ messages...")
+
+        # Step 4: Message loop
+        while True:
+            try:
+                msg = await asyncio.wait_for(message_queue.get(), timeout=60)
+            except asyncio.TimeoutError:
+                # Periodic health check
+                try:
                     async with session.get(f"{agent_base}/agent/health",
                                            timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status != 200:
-                            log(f"[{profile_id}] tab worker health check failed")
-            except Exception:
-                log(f"[{profile_id}] tab worker unreachable")
-            continue
+                            log(profile_id, "tab worker health check failed")
+                except Exception:
+                    log(profile_id, "tab worker unreachable")
+                continue
 
-        from_id = msg["from"]
-        content = msg["content"]
-        log(f"[{profile_id}] message from {from_id}: {content[:80]}...")
+            from_id = msg["from"]
+            content = msg["content"]
+            log(profile_id, f"message from {from_id}: {content[:80]}...")
 
-        # Forward to z.ai
-        response = await forward_to_zai(agent_base, content, profile_id)
-        log(f"[{profile_id}] z.ai response: {str(response)[:80]}...")
+            # Check if we have an existing z.ai chat for this friend
+            chat_id = chat_map.get(from_id)
+            if chat_id:
+                log(profile_id, f"continuing chat {chat_id} for {from_id}")
+            else:
+                # Create a new chat
+                chat_id = await zai_new_chat(session, agent_base, profile_id)
+                if chat_id:
+                    chat_map[from_id] = chat_id
 
-        # Send response back via AICQ
-        try:
-            await core.send_message(from_id, str(response))
-            log(f"[{profile_id}] response sent to {from_id}")
-        except Exception as e:
-            log(f"[{profile_id}] send_message error: {e}")
-            # Fallback: try chat()
+            # Type + send
+            ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content)
+            if not ok:
+                log(profile_id, f"failed to send to z.ai: {send_result}")
+                await core.send_message(from_id, f"发送失败: {send_result}")
+                continue
+
+            # Wait for response
+            response = await zai_wait_for_response(session, agent_base, profile_id)
+            log(profile_id, f"z.ai response: {str(response)[:80]}...")
+
+            # Send response back via AICQ
             try:
-                await core.send_message(from_id, str(response)[:2000])
-            except Exception as e2:
-                log(f"[{profile_id}] fallback send also failed: {e2}")
+                await core.send_message(from_id, str(response))
+                log(profile_id, f"response sent to {from_id}")
+            except Exception as e:
+                log(profile_id, f"send_message error: {e}")
+    finally:
+        await session.close()
 
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", required=True, help="profile ID")
-    parser.add_argument("--agent-port", type=int, required=True,
-                        help="tab worker agent API port")
-    parser.add_argument("--db-path", required=True,
-                        help="AICQ SDK db file path for this profile")
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--agent-port", type=int, required=True)
+    parser.add_argument("--db-path", required=True)
     args = parser.parse_args()
 
-    # Retry connection if tab worker isn't ready yet
+    # Wait for tab worker to be ready
     for attempt in range(30):
         try:
             async with aiohttp.ClientSession() as session:
@@ -342,7 +489,7 @@ async def main():
                         break
         except Exception:
             pass
-        log(f"[{args.profile}] waiting for tab worker (attempt {attempt+1})...")
+        log(args.profile, f"waiting for tab worker (attempt {attempt+1})...")
         await asyncio.sleep(2)
 
     await run_bridge(args.profile, args.agent_port, args.db_path)
