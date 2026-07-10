@@ -402,8 +402,13 @@ async def zai_type_and_send(session, agent_base, profile_id, message, core=None,
     return False, "max retries exceeded (high traffic)"
 
 
-async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180):
-    """Poll for z.ai's response. Returns the response text."""
+async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180, core=None, from_id=None):
+    """Poll for z.ai's response. Returns the response text.
+
+    If core + from_id are provided, checks is_stream_cancelled on each
+    poll — if the user clicked the stop button on aicq.me, clicks z.ai's
+    stop button and returns whatever response was received so far.
+    """
     last_response = ""
     stable_count = 0
     for attempt in range(max_wait // 5):
@@ -466,6 +471,35 @@ async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180):
                     stable_count = 0
             elif stage == "error":
                 return f"Error: {result.get('error', 'unknown')}"
+
+        # Check if user clicked the stop button on aicq.me
+        if core and from_id:
+            try:
+                if await core.is_stream_cancelled(from_id):
+                    log(profile_id, "stream cancelled by user — stopping z.ai")
+                    await core.clear_stream_cancel(from_id)
+                    # Click z.ai's stop button (if visible)
+                    await zai_eval(session, agent_base, """(function(){
+                        // z.ai stop button — look for stop/cancel buttons
+                        var btns = document.querySelectorAll('button');
+                        for (var i = 0; i < btns.length; i++) {
+                            var b = btns[i];
+                            var t = (b.innerText || '').trim();
+                            var title = (b.getAttribute('title') || '').toLowerCase();
+                            var r = b.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0 &&
+                                (t === '停止' || t === 'Stop' || t === '停止生成' ||
+                                 title.indexOf('stop') >= 0 || title.indexOf('停止') >= 0)) {
+                                b.click();
+                                return 'stopped';
+                            }
+                        }
+                        return 'no_stop_btn';
+                    })()""")
+                    return last_response + "\n\n*[已停止]*" if last_response else "*[已停止]*"
+            except Exception:
+                pass
+
         await asyncio.sleep(3)
     return last_response or "(z.ai 超时未响应)"
 
@@ -615,7 +649,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                     pass
 
             # Wait for response (poll every 3s, max 180s)
-            response = await zai_wait_for_response(session, agent_base, profile_id)
+            response = await zai_wait_for_response(session, agent_base, profile_id, core=core, from_id=from_id)
             log(profile_id, f"z.ai response: {str(response)[:80]}...")
 
             # Send response back via AICQ as a stream (so the status bar
