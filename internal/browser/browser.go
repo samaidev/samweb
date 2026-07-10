@@ -154,43 +154,30 @@ func Run(opts Options) error {
         err = wails.Run(&options.App{
                 Title:     opts.Title,
                 Width:     opts.Width,
-                Height:    opts.Height,
-                MinWidth:  400,
-                MinHeight: 300,
-                AssetServer: &assetserver.Options{
+        // Set the backend's context (needed for WindowExecJS).
+        backend.SetContext(ctx)
+
+        // Run the wails app — configured identically to samoffice (which
+        // has working left-click). No custom Handler, no OnDomReady JS
+        // injection, with BackgroundColour.
+        err = wails.Run(&options.App{
+                Title:            opts.Title,
+                Width:            opts.Width,
+                Height:           opts.Height,
+                MinWidth:         400,
+                MinHeight:        300,
+                AssetServer:      &assetserver.Options{
                         Assets: uiAssets,
-                        Handler: &uiAssetHandler{
-                                uiPort:   uiPort,
-                                engine:   engine,
-                                agentAddr: opts.AgentAddr,
-                        },
                 },
+                BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
                 OnStartup: func(ctx context.Context) {
-                        // Save the context for later use.
                         backend.SetContext(ctx)
                         log.Printf("[browser] wails app started")
                 },
-                OnDomReady: func(ctx context.Context) {
-                        // Inject the agent bootstrap JS.
-                        wailsRuntime.WindowExecJS(ctx, agentJS)
-                        log.Printf("[browser] agent bootstrap JS injected")
-                },
                 Bind: []interface{}{
-                        backend, // expose backend methods to JS
+                        backend,
                 },
         })
-
-        // Shutdown.
-        _ = agentSrv.Shutdown(gracefulCtx())
-        cancel()
-        return err
-}
-
-// uiAssetHandler serves dynamic routes (/api/config, /api/resolve, /proxy)
-// alongside the embedded static files. wails calls Handler for every request;
-// if it returns nil, wails falls back to serving the embedded asset.
-type uiAssetHandler struct {
-        uiPort    int
         engine    search.Engine
         agentAddr string
 }
