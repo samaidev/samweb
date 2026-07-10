@@ -651,20 +651,42 @@ function escapeAttr(s) {
 
 // ----------------------------- Bookmarks -----------------------------
 function toggleBookmark() {
+  // Use the omnibox value as the current URL — this works even in
+  // "直接打开" mode where the samweb UI's tab.url stays at about:newtab
+  // (because the page loaded in the top-level WebView2, not the iframe).
+  const omniboxUrl = el.omnibox.value.trim();
   const t = activeTab();
-  if (!t || t.url === 'about:newtab') return;
-  const idx = state.bookmarks.findIndex(b => b.url === t.url);
+  let url = omniboxUrl || (t ? t.url : '');
+  // Normalize: if user typed "z.ai", resolve to "https://z.ai"
+  if (url && !url.startsWith('http://') && !url.startsWith('https://') && url !== 'about:newtab') {
+    // Simple heuristic: prepend https:// if it looks like a domain
+    if (url.indexOf('.') >= 0 || url.indexOf('localhost') >= 0) {
+      url = 'https://' + url;
+    }
+  }
+  if (!url || url === 'about:newtab' || url === 'about:blank') {
+    alert('请先在地址栏输入网址，再点书签按钮');
+    return;
+  }
+  const idx = state.bookmarks.findIndex(b => b.url === url);
   if (idx >= 0) {
     state.bookmarks.splice(idx, 1);
   } else {
-    state.bookmarks.push({ url: t.url, title: t.title, ts: Date.now() });
+    state.bookmarks.push({ url: url, title: (t ? t.title : '') || url, ts: Date.now() });
   }
   saveJSON('samweb.bookmarks', state.bookmarks);
-  updateBookmarkButton(t.url);
+  updateBookmarkButton(url);
   if (!el.bookmarksPopover.classList.contains('hidden')) renderBookmarksPopover();
+  // Brief visual feedback
+  el.bookmark.style.color = '#34a853';
+  setTimeout(() => { el.bookmark.style.color = ''; }, 600);
 }
 
 function updateBookmarkButton(url) {
+  if (!url) {
+    el.bookmark.classList.remove('active');
+    return;
+  }
   const isMarked = state.bookmarks.some(b => b.url === url);
   el.bookmark.classList.toggle('active', isMarked);
 }
