@@ -816,14 +816,38 @@ async def run_bridge(profile_id, agent_port, db_path):
             queue_size = message_queue.qsize()
             if queue_size > 0:
                 log(profile_id, f"message from {from_id}: {content[:80]}... ({queue_size} more in queue)")
-                # Notify user that previous messages are still processing
-                try:
-                    await core.send_stream_chunk(from_id, "thinking",
-                        f"正在处理... 队列中还有 {queue_size} 条消息")
-                except Exception:
-                    pass
             else:
                 log(profile_id, f"message from {from_id}: {content[:80]}...")
+
+            # Wait for z.ai to be ready before processing: Agent mode
+            # must be active + chat input must be available. This prevents
+            # sending messages before the page is fully loaded.
+            ready = False
+            for ready_attempt in range(15):
+                check = await zai_eval(session, agent_base, """(function(){
+                    // Check if Agent mode is active (look for Agent-mode-only features)
+                    var body = document.body ? document.body.innerText : '';
+                    var hasAgent = body.indexOf('深度思考') >= 0 || body.indexOf('最高') >= 0
+                        || body.indexOf('落地页') >= 0 || body.indexOf('科普/教案') >= 0;
+                    // Check if chat input is available
+                    var input = document.querySelector('#chat-input, textarea[class*="chat-input"], div[contenteditable="true"]');
+                    var hasInput = input && input.getBoundingClientRect().width > 0;
+                    return JSON.stringify({agent_mode: hasAgent, has_input: hasInput});
+                })()""")
+                if isinstance(check, str):
+                    try: check = json.loads(check)
+                    except: pass
+                if isinstance(check, dict) and check.get("agent_mode") and check.get("has_input"):
+                    ready = True
+                    break
+                log(profile_id, f"waiting for z.ai ready (attempt {ready_attempt+1}/15)...")
+                # Try switching to Agent mode again
+                if ready_attempt == 0:
+                    await zai_switch_to_agent_mode(session, agent_base, profile_id)
+                await asyncio.sleep(3)
+
+            if not ready:
+                log(profile_id, "z.ai not ready after 45s, processing anyway")
 
             # "/new" command: delete old chats + create a new z.ai chat,
             # then wait for the next message (don't send "/new" to z.ai).
