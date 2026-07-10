@@ -479,8 +479,9 @@ var portAllocMu sync.Mutex
 // The bridge connects to the tab worker's agent API (for z.ai DOM
 // automation) and the profile's AICQ db (for AICQ message polling).
 func spawnAICQBridge(profileID string, agentPort int, dbPath string) {
-        // Wait a bit for the tab worker to fully start (z.ai loaded)
-        time.Sleep(8 * time.Second)
+        // Wait for the tab worker to fully start: z.ai loaded + cookies +
+        // localStorage injected + page reloaded. This takes ~20 seconds.
+        time.Sleep(20 * time.Second)
 
         // Find Python 3.13
         pythonPaths := []string{
@@ -608,6 +609,37 @@ func (b *WailsBackend) Eval(ctx context.Context, script string) (json.RawMessage
                 return json.RawMessage(r), nil
         }
         return resp.Value, nil
+}
+
+// CDPEval runs a JS eval via CDP Runtime.evaluate directly (not via the
+// dispatch layer). This is used by tab workers which don't have the
+// samweb UI bootstrap JS injected (so dispatch would time out).
+func (b *WailsBackend) CDPEval(ctx context.Context, script string) (json.RawMessage, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil, fmt.Errorf("CDP client not connected")
+        }
+        resp, err := c.Send("Runtime.evaluate", map[string]interface{}{
+                "expression":    script,
+                "returnByValue": true,
+                "awaitPromise":  true,
+        })
+        if err != nil {
+                return nil, err
+        }
+        // Extract the result value from the CDP response.
+        // Response format: {"result":{"type":"...","value":<value>}}
+        var wrap struct {
+                Result struct {
+                        Value json.RawMessage `json:"value"`
+                } `json:"result"`
+        }
+        if err := json.Unmarshal(resp, &wrap); err != nil {
+                return resp, nil
+        }
+        return wrap.Result.Value, nil
 }
 
 func (b *WailsBackend) Wait(ctx context.Context, selector string, timeoutMs int) error {

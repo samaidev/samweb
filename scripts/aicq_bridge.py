@@ -48,10 +48,13 @@ def log(profile_id, msg):
 
 # ---------- z.ai DOM automation helpers ----------
 
-async def zai_eval(session, agent_base, script, timeout=15):
-    """Run a JS eval on the tab worker's z.ai page."""
+async def zai_eval(session, agent_base, script, timeout=30):
+    """Run a JS eval on the tab worker's z.ai page via CDP Runtime.evaluate.
+    Uses /agent/cdp-eval (not /agent/eval) because tab workers don't have
+    the samweb UI bootstrap JS injected, so the dispatch-based eval times out.
+    """
     try:
-        resp = await session.post(f"{agent_base}/agent/eval",
+        resp = await session.post(f"{agent_base}/agent/cdp-eval",
                                   json={"script": script},
                                   timeout=aiohttp.ClientTimeout(total=timeout))
         data = await resp.json()
@@ -72,22 +75,33 @@ async def zai_eval(session, agent_base, script, timeout=15):
 async def zai_switch_to_agent_mode(session, agent_base, profile_id):
     """Switch z.ai from Chat mode to Agent mode."""
     log(profile_id, "switching to Agent mode...")
+    # z.ai has "Chat 模式" and "Agent 模式" as clickable DIVs in the sidebar.
+    # We click "Agent 模式" to switch. The element has class containing "flex-1"
+    # and text exactly "Agent 模式".
     result = await zai_eval(session, agent_base, """(function(){
-        var all = document.querySelectorAll('div, button, a, span, li');
+        // Find the Agent 模式 button — it's a DIV with direct text node "Agent 模式"
+        var all = document.querySelectorAll('div');
         for (var i = 0; i < all.length; i++) {
-            var el = all[i]; var dt = '';
+            var el = all[i];
+            // Check direct text content (not including children)
+            var directText = '';
             for (var j = 0; j < el.childNodes.length; j++) {
-                var n = el.childNodes[j]; if (n.nodeType === 3) dt += n.nodeValue;
+                var n = el.childNodes[j];
+                if (n.nodeType === 3) directText += n.nodeValue;
             }
-            dt = dt.trim();
-            if (dt === 'Agent 模式' || dt === 'Agent Mode') {
+            directText = directText.trim();
+            if (directText === 'Agent 模式' || directText === 'Agent Mode') {
                 var r = el.getBoundingClientRect();
-                if (r.width > 0 && r.height > 0) { el.click(); return 'ok'; }
+                if (r.width > 0 && r.height > 0) {
+                    el.click();
+                    return 'clicked';
+                }
             }
         }
-        // Maybe already in Agent mode
+        // Fallback: check if already in Agent mode (look for Agent-mode-specific UI)
         var body = document.body ? document.body.innerText : '';
-        if (body.indexOf('Agent 模式') >= 0 && body.indexOf('Chat 模式') >= 0) {
+        if (body.indexOf('深度思考') >= 0 || body.indexOf('最高') >= 0) {
+            // These are Agent-mode-only features
             return 'already_agent';
         }
         return 'not_found';

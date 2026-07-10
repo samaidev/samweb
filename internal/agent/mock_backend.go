@@ -272,6 +272,10 @@ func (m *MockBackend) CDPNavigateTop(ctx context.Context, url string) error {
         return fmt.Errorf("CDPNavigateTop not supported on mock backend")
 }
 
+func (m *MockBackend) CDPEval(ctx context.Context, script string) (json.RawMessage, error) {
+        return nil, fmt.Errorf("CDPEval not supported on mock backend")
+}
+
 func (m *MockBackend) SpawnTab(ctx context.Context, profileID, url string) (TabWorkerInfo, error) {
         return TabWorkerInfo{}, fmt.Errorf("SpawnTab not supported on mock backend")
 }

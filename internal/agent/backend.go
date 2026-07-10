@@ -78,6 +78,11 @@ type Backend interface {
 
         // Inspection
         Eval(ctx context.Context, script string) (json.RawMessage, error)
+
+        // CDPEval runs a JS eval via CDP Runtime.evaluate (not via the
+        // dispatch layer). Used by tab workers which don't have the
+        // samweb UI bootstrap JS injected.
+        CDPEval(ctx context.Context, script string) (json.RawMessage, error)
         Wait(ctx context.Context, selector string, timeoutMs int) error
         Elements(ctx context.Context, selector string) ([]Element, error)
         Element(ctx context.Context, selector string) (*Element, error)

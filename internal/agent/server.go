@@ -112,6 +112,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/breakthrough", s.handleBreakthrough)
 
         mux.HandleFunc("/agent/eval", s.handleEval)
+        mux.HandleFunc("/agent/cdp-eval", s.handleCDPEval)
         mux.HandleFunc("/agent/wait", s.handleWait)
         mux.HandleFunc("/agent/elements", s.handleElements)
         mux.HandleFunc("/agent/element", s.handleElement)
@@ -677,6 +678,32 @@ func (s *Server) handleListTabWorkers(w http.ResponseWriter, r *http.Request) {
                 return
         }
         writeJSON(w, http.StatusOK, workers)
+}
+
+// handleCDPEval runs a JS eval via CDP Runtime.evaluate (bypasses the
+// dispatch layer). Used by tab workers which don't have bootstrap JS.
+// POST /agent/cdp-eval {"script":"..."} → {"value":<result>}
+func (s *Server) handleCDPEval(w http.ResponseWriter, r *http.Request) {
+        var opts EvalOpts
+        if err := readJSON(r, &opts); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if opts.Script == "" {
+                writeError(w, http.StatusBadRequest, "script is required")
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 30*time.Second)
+        defer cancel()
+        val, err := s.backend.CDPEval(ctx, opts.Script)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        if val == nil {
+                val = json.RawMessage("null")
+        }
+        writeJSON(w, http.StatusOK, EvalResult{Value: val})
 }
 
 // handleBreakthrough automatically detects and bypasses slider captchas.
