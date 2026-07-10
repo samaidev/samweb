@@ -43,6 +43,7 @@ const el = {
   history: document.getElementById('history-btn'),
   bookmarks: document.getElementById('bookmarks-btn'),
   engine: document.getElementById('engine-btn'),
+  spawnAll: document.getElementById('spawn-all-btn'),
   view: document.getElementById('view'),
   popoverMask: document.getElementById('popover-mask'),
   enginePopover: document.getElementById('engine-popover'),
@@ -93,6 +94,7 @@ function bindEvents() {
   el.history.addEventListener('click', () => togglePopover('history'));
   el.bookmarks.addEventListener('click', () => togglePopover('bookmarks'));
   el.engine.addEventListener('click', () => togglePopover('engine'));
+  el.spawnAll.addEventListener('click', () => spawnAllProfiles());
   el.clearHistory.addEventListener('click', () => clearHistory());
 
   // Profile events
@@ -647,6 +649,58 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) {
   return escapeHtml(s);
+}
+
+// ----------------------------- Spawn All Profiles -----------------------------
+// spawnAllProfiles spawns a tab worker (independent OS window) for each
+// saved profile, each loading the given URL in an isolated user-data-dir.
+// This is the multi-profile multi-window mode: each profile gets its own
+// window with its own cookie store + localStorage, so multiple z.ai
+// accounts can be online simultaneously.
+async function spawnAllProfiles() {
+  // Ask for URL (default z.ai)
+  const url = prompt('为所有 profile 打开哪个网址？', 'https://chat.z.ai');
+  if (!url || !url.trim()) return;
+
+  // Confirm
+  const count = state.profiles.length;
+  if (!confirm(`将为 ${count} 个 profile 各打开一个独立窗口：\n\n  ${url}\n\n每个窗口有独立的 cookie + localStorage，可同时在线不同账号。\n\n继续？`)) {
+    return;
+  }
+
+  el.spawnAll.style.opacity = '0.5';
+  el.spawnAll.disabled = true;
+  try {
+    const resp = await fetch('/agent/spawn-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json',
+                 'Authorization': 'Bearer test-token-2026' },
+      body: JSON.stringify({ url: url.trim() }),
+    });
+    if (!resp.ok) {
+      alert('打开失败：' + await resp.text());
+      return;
+    }
+    const result = await resp.json();
+    const spawned = result.spawned || [];
+    const failed = result.failed || [];
+    let msg = `已打开 ${spawned.length} 个窗口：\n`;
+    for (const w of spawned) {
+      msg += `  ✓ ${w.profile_name} (agent port ${w.agent_port}, pid ${w.pid})\n`;
+    }
+    if (failed.length > 0) {
+      msg += `\n${failed.length} 个失败：\n`;
+      for (const f of failed) {
+        msg += `  ✗ ${f.profile}: ${f.error}\n`;
+      }
+    }
+    alert(msg);
+  } catch (e) {
+    alert('出错：' + e.message);
+  } finally {
+    el.spawnAll.style.opacity = '';
+    el.spawnAll.disabled = false;
+  }
 }
 
 // ----------------------------- Bookmarks -----------------------------

@@ -6,6 +6,10 @@ import (
         "errors"
         "fmt"
         "log"
+        "net"
+        "os"
+        "os/exec"
+        "path/filepath"
         "strings"
         "sync"
         "time"
@@ -294,6 +298,198 @@ func (b *WailsBackend) CDPNavigateTop(ctx context.Context, url string) error {
                 log.Printf("[browser] Page.enable warning: %v", err)
         }
         return c.Navigate(url)
+}
+
+// tabWorkerRegistry tracks all spawned tab worker processes.
+var tabWorkerRegistry = struct {
+        mu      sync.Mutex
+        workers map[string]*tabWorkerProc // keyed by profileID
+}{
+        workers: map[string]*tabWorkerProc{},
+}
+
+type tabWorkerProc struct {
+        info       agent.TabWorkerInfo
+        cmd        *exec.Cmd
+        agentPort  int
+        cdpPort    int
+}
+
+// SpawnTab spawns a new samweb --tab child process for the given profile.
+// The child process uses an isolated user-data-dir so it has its own
+// cookie store + localStorage. Agent port + CDP port are auto-assigned
+// atomically (using a global mutex + listener hold to prevent races).
+func (b *WailsBackend) SpawnTab(ctx context.Context, profileID, url string) (agent.TabWorkerInfo, error) {
+        // Serialize port allocation to prevent races when spawning multiple
+        // tab workers in quick succession (freePort alone is racy because
+        // the port isn't actually used until the child process starts).
+        portAllocMu.Lock()
+        defer portAllocMu.Unlock()
+
+        // Get profile name
+        prof, ok, err := Profiles().Get(profileID)
+        if err != nil || !ok {
+                return agent.TabWorkerInfo{}, fmt.Errorf("profile not found: %s", profileID)
+        }
+
+        // Kill existing worker for this profile (if any)
+        tabWorkerRegistry.mu.Lock()
+        if existing, exists := tabWorkerRegistry.workers[profileID]; exists {
+                tabWorkerRegistry.mu.Unlock()
+                _ = existing.cmd.Process.Kill()
+                // Wait briefly for it to exit
+                time.Sleep(500 * time.Millisecond)
+        } else {
+                tabWorkerRegistry.mu.Unlock()
+        }
+
+        // Determine user-data-dir
+        home, _ := os.UserHomeDir()
+        userDataDir := filepath.Join(home, ".samweb", "data", profileID)
+        os.MkdirAll(userDataDir, 0755)
+
+        // Allocate CDP port (child process will use this for CDP debug).
+        // Agent port is chosen by the child process itself and reported
+        // back via a file (avoids port-binding races between parent and
+        // child).
+        cdpLn, err := net.Listen("tcp", "127.0.0.1:0")
+        if err != nil {
+                return agent.TabWorkerInfo{}, fmt.Errorf("allocate cdp port: %w", err)
+        }
+        cdpPort := cdpLn.Addr().(*net.TCPAddr).Port
+        cdpLn.Close() // release so child can bind it
+
+        // Path to samweb.exe
+        exePath, err := os.Executable()
+        if err != nil {
+                return agent.TabWorkerInfo{}, fmt.Errorf("get executable path: %w", err)
+        }
+
+        title := fmt.Sprintf("SamWeb - %s", prof.Name)
+        cmd := exec.Command(exePath,
+                "--tab",
+                "--profile", profileID,
+                "--user-data-dir", userDataDir,
+                "--cdp-port", fmt.Sprint(cdpPort),
+                "--url", url,
+                "--title", title,
+                "--width", "900",
+                "--height", "650",
+        )
+        // Redirect child stdout/stderr to a log file for debugging
+        logPath := filepath.Join(home, ".samweb", "logs", profileID+".log")
+        os.MkdirAll(filepath.Dir(logPath), 0755)
+        logFile, _ := os.Create(logPath)
+        if logFile != nil {
+                cmd.Stdout = logFile
+                cmd.Stderr = logFile
+        }
+        cmd.Stdin = nil
+        if err := cmd.Start(); err != nil {
+                return agent.TabWorkerInfo{}, fmt.Errorf("spawn tab worker: %w", err)
+        }
+
+        // Wait for the child process to write its agent port to a file.
+        // The child writes to <userDataDir>/agent_port after binding.
+        agentPortFile := filepath.Join(userDataDir, "agent_port")
+        var agentPort int
+        for i := 0; i < 30; i++ {
+                time.Sleep(300 * time.Millisecond)
+                data, err := os.ReadFile(agentPortFile)
+                if err == nil {
+                        fmt.Sscanf(string(data), "%d", &agentPort)
+                        if agentPort > 0 {
+                                break
+                        }
+                }
+        }
+        if agentPort == 0 {
+                log.Printf("[browser] warning: could not read agent port for profile %s", profileID)
+        }
+
+        // Wait for the child's CDP port to be listening (WebView2 fully
+        // initialized). This prevents the next SpawnTab from starting
+        // while the previous WebView2 is still initializing (which causes
+        // 8007139f errors). Wait up to 30 seconds.
+        cdpReady := false
+        for i := 0; i < 60; i++ {
+                conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", cdpPort))
+                if err == nil {
+                        conn.Close()
+                        cdpReady = true
+                        log.Printf("[browser] tab worker CDP port %d ready (after %ds)", cdpPort, i/2)
+                        break
+                }
+                time.Sleep(500 * time.Millisecond)
+        }
+        if !cdpReady {
+                log.Printf("[browser] warning: tab worker CDP port %d not ready after 30s", cdpPort)
+        }
+        // Extra delay to let WebView2 fully settle before next spawn
+        time.Sleep(2 * time.Second)
+
+        info := agent.TabWorkerInfo{
+                ProfileID:   profileID,
+                ProfileName: prof.Name,
+                URL:         url,
+                AgentPort:   agentPort,
+                CDPPort:     cdpPort,
+                PID:         cmd.Process.Pid,
+        }
+
+        tabWorkerRegistry.mu.Lock()
+        tabWorkerRegistry.workers[profileID] = &tabWorkerProc{
+                info:      info,
+                cmd:       cmd,
+                agentPort: agentPort,
+                cdpPort:   cdpPort,
+        }
+        tabWorkerRegistry.mu.Unlock()
+
+        go func() {
+                _ = cmd.Wait()
+                tabWorkerRegistry.mu.Lock()
+                delete(tabWorkerRegistry.workers, profileID)
+                tabWorkerRegistry.mu.Unlock()
+                log.Printf("[browser] tab worker for profile %s exited", profileID)
+        }()
+
+        log.Printf("[browser] spawned tab worker: profile=%s url=%s agent_port=%d cdp_port=%d pid=%d",
+                profileID, url, agentPort, cdpPort, cmd.Process.Pid)
+        return info, nil
+}
+
+// portAllocMu serializes port allocation in SpawnTab to prevent races.
+var portAllocMu sync.Mutex
+
+// ListTabWorkers returns info about all running tab workers.
+func (b *WailsBackend) ListTabWorkers(ctx context.Context) ([]agent.TabWorkerInfo, error) {
+        tabWorkerRegistry.mu.Lock()
+        defer tabWorkerRegistry.mu.Unlock()
+        out := make([]agent.TabWorkerInfo, 0, len(tabWorkerRegistry.workers))
+        for _, w := range tabWorkerRegistry.workers {
+                out = append(out, w.info)
+        }
+        return out, nil
+}
+
+// freePort finds a free TCP port starting from the given port number.
+func freePort(start int) int {
+        for p := start; p < start+100; p++ {
+                ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+                if err == nil {
+                        ln.Close()
+                        return p
+                }
+        }
+        // Fallback: let OS choose
+        ln, err := net.Listen("tcp", "127.0.0.1:0")
+        if err == nil {
+                p := ln.Addr().(*net.TCPAddr).Port
+                ln.Close()
+                return p
+        }
+        return start
 }
 
 func (b *WailsBackend) BreakthroughSlider(ctx context.Context) (string, bool, error) {

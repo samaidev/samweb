@@ -272,6 +272,14 @@ func (m *MockBackend) CDPNavigateTop(ctx context.Context, url string) error {
         return fmt.Errorf("CDPNavigateTop not supported on mock backend")
 }
 
+func (m *MockBackend) SpawnTab(ctx context.Context, profileID, url string) (TabWorkerInfo, error) {
+        return TabWorkerInfo{}, fmt.Errorf("SpawnTab not supported on mock backend")
+}
+
+func (m *MockBackend) ListTabWorkers(ctx context.Context) ([]TabWorkerInfo, error) {
+        return nil, fmt.Errorf("ListTabWorkers not supported on mock backend")
+}
+
 func (m *MockBackend) BreakthroughSlider(ctx context.Context) (string, bool, error) {
         return "", false, fmt.Errorf("BreakthroughSlider not supported on mock backend")
 }

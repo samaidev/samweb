@@ -61,6 +61,16 @@ type Backend interface {
         // after this — bring it back with CDPNavigateTop("http://wails.localhost/").
         CDPNavigateTop(ctx context.Context, url string) error
 
+        // SpawnTab spawns a new tab worker process for the given profile,
+        // loading the given URL in an isolated user-data-dir. Used for
+        // multi-profile multi-window support (each profile = one OS window
+        // with its own cookie store + localStorage).
+        SpawnTab(ctx context.Context, profileID, url string) (TabWorkerInfo, error)
+
+        // ListTabWorkers returns info about all currently-running tab
+        // workers spawned by this samweb instance.
+        ListTabWorkers(ctx context.Context) ([]TabWorkerInfo, error)
+
         // BreakthroughSlider automatically detects and bypasses slider
         // captchas on the current page using the breakthrough framework.
         // Returns the challenge name and success status.

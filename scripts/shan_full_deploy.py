@@ -13,12 +13,15 @@ from shan_lib.ssh import open_ssh, run
 
 # (local path, remote path)
 FILES = [
+    ("/home/z/my-project/cmd/samweb/main.go",                 "C:/samweb/cmd/samweb/main.go"),
     ("/home/z/my-project/internal/browser/browser.go",        "C:/samweb/internal/browser/browser.go"),
     ("/home/z/my-project/internal/browser/wails_backend.go",  "C:/samweb/internal/browser/wails_backend.go"),
     ("/home/z/my-project/internal/browser/profiles.go",       "C:/samweb/internal/browser/profiles.go"),
+    ("/home/z/my-project/internal/browser/tab_worker.go",     "C:/samweb/internal/browser/tab_worker.go"),
     ("/home/z/my-project/internal/agent/server.go",           "C:/samweb/internal/agent/server.go"),
     ("/home/z/my-project/internal/agent/backend.go",          "C:/samweb/internal/agent/backend.go"),
     ("/home/z/my-project/internal/agent/mock_backend.go",     "C:/samweb/internal/agent/mock_backend.go"),
+    ("/home/z/my-project/internal/agent/types.go",            "C:/samweb/internal/agent/types.go"),
     ("/home/z/my-project/internal/cdp/client.go",             "C:/samweb/internal/cdp/client.go"),
     ("/home/z/my-project/internal/browser/ui/index.html",     "C:/samweb/internal/browser/ui/index.html"),
     ("/home/z/my-project/internal/browser/ui/app.js",         "C:/samweb/internal/browser/ui/app.js"),

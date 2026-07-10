@@ -37,11 +37,25 @@ type Options struct {
         AgentAddr  string
         AgentToken string
         CDPPort    int
+
+        // Tab worker mode: borderless window that loads a URL directly
+        // (no samweb UI chrome), using an isolated user-data-dir for
+        // cookie/localStorage isolation. Used for multi-profile support.
+        TabMode     bool
+        Profile     string // profile ID
+        UserDataDir string // WebView2 user-data-dir (isolated cookie store)
+        AgentPort   int    // agent HTTP API port (0 = disable in tab mode)
+        StartURL    string // URL to load on startup
 }
 
 // Run starts the wails app and the agent HTTP server. Blocks until the
 // window is closed.
 func Run(opts Options) error {
+        // Tab worker mode: borderless window, no samweb UI, load URL directly.
+        if opts.TabMode {
+                return runTabWorker(opts)
+        }
+
         if opts.Title == "" {
                 opts.Title = "SamWeb"
         }
@@ -58,13 +72,12 @@ func Run(opts Options) error {
                 opts.CDPPort = 9222
         }
 
-        // Enable WebView2's remote debugging port for CDP.
-        if os.Getenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") == "" {
-                os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-                        "--remote-debugging-port="+fmt.Sprint(opts.CDPPort))
-                log.Printf("[browser] set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=%s",
-                        os.Getenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"))
+        // Enable WebView2's remote debugging port for CDP. The patched
+        // go-webview2 chromium.go reads WEBVIEW2_CDP_PORT (default 9222).
+        if os.Getenv("WEBVIEW2_CDP_PORT") == "" {
+                os.Setenv("WEBVIEW2_CDP_PORT", fmt.Sprint(opts.CDPPort))
         }
+        log.Printf("[browser] WEBVIEW2_CDP_PORT=%s", os.Getenv("WEBVIEW2_CDP_PORT"))
 
         // Pick the default search engine.
         engine := search.DefaultEngine

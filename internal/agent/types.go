@@ -240,3 +240,13 @@ type ProfileInfo struct {
         Created     int64  `json:"created"` // unix seconds
         Updated     int64  `json:"updated"` // unix seconds
 }
+
+// TabWorkerInfo describes a running tab worker process.
+type TabWorkerInfo struct {
+	ProfileID  string `json:"profile_id"`
+	ProfileName string `json:"profile_name"`
+	URL        string `json:"url"`
+	AgentPort  int    `json:"agent_port"`
+	CDPPort    int    `json:"cdp_port"`
+	PID        int    `json:"pid"`
+}

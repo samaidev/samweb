@@ -126,6 +126,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/profiles/switch", s.handleProfileSwitch) // POST {id}
         mux.HandleFunc("/agent/profiles/rename", s.handleProfileRename) // POST {id, name}
         mux.HandleFunc("/agent/profiles/delete", s.handleProfileDelete) // POST {id}
+
+        // Tab worker spawning (multi-profile multi-window support)
+        mux.HandleFunc("/agent/spawn-tab", s.handleSpawnTab)           // POST {profile, url}
+        mux.HandleFunc("/agent/spawn-all", s.handleSpawnAll)           // POST {url} — spawn all profiles
+        mux.HandleFunc("/agent/tab-workers", s.handleListTabWorkers)   // GET
 }
 
 // ----------------------------- helpers -----------------------------
@@ -591,6 +596,87 @@ func (s *Server) handleCDPNavigateTop(w http.ResponseWriter, r *http.Request) {
                 return
         }
         writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleSpawnTab spawns a new tab worker process for the given profile.
+// POST /agent/spawn-tab {"profile":"qq","url":"https://chat.z.ai"}
+// → {"profile_id":"qq","profile_name":"qq","url":"...","agent_port":7780,"cdp_port":9223,"pid":12345}
+func (s *Server) handleSpawnTab(w http.ResponseWriter, r *http.Request) {
+        var body struct {
+                Profile string `json:"profile"`
+                URL     string `json:"url"`
+        }
+        if err := readJSON(r, &body); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if body.Profile == "" {
+                writeError(w, http.StatusBadRequest, "missing profile")
+                return
+        }
+        if body.URL == "" {
+                body.URL = "https://chat.z.ai"
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 30*time.Second)
+        defer cancel()
+        info, err := s.backend.SpawnTab(ctx, body.Profile, body.URL)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, info)
+}
+
+// handleSpawnAll spawns a tab worker for every saved profile.
+// POST /agent/spawn-all {"url":"https://chat.z.ai"}
+// → {"spawned":[...],"failed":[...]}
+func (s *Server) handleSpawnAll(w http.ResponseWriter, r *http.Request) {
+        var body struct {
+                URL string `json:"url"`
+        }
+        if r.Method == "POST" {
+                _ = readJSON(r, &body)
+        }
+        if body.URL == "" {
+                body.URL = "https://chat.z.ai"
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 300*time.Second)
+        defer cancel()
+        // Get all profiles
+        profs, _, err := s.backend.ListProfiles(ctx)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, "list profiles: "+err.Error())
+                return
+        }
+        var spawned []TabWorkerInfo
+        var failed []map[string]string
+        for _, p := range profs {
+                info, err := s.backend.SpawnTab(ctx, p.ID, body.URL)
+                if err != nil {
+                        failed = append(failed, map[string]string{
+                                "profile": p.ID, "error": err.Error(),
+                        })
+                } else {
+                        spawned = append(spawned, info)
+                }
+        }
+        writeJSON(w, http.StatusOK, map[string]interface{}{
+                "spawned": spawned,
+                "failed":  failed,
+        })
+}
+
+// handleListTabWorkers returns info about all running tab workers.
+// GET /agent/tab-workers → [{"profile_id":"qq",...},...]
+func (s *Server) handleListTabWorkers(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        workers, err := s.backend.ListTabWorkers(ctx)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, workers)
 }
 
 // handleBreakthrough automatically detects and bypasses slider captchas.
