@@ -458,7 +458,7 @@ async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180):
                 resp_text = result.get("response", "")
                 if resp_text == last_response:
                     stable_count += 1
-                    if stable_count >= 3:
+                    if stable_count >= 2:
                         log(profile_id, f"response ready ({len(resp_text)} chars)")
                         return resp_text
                 else:
@@ -466,7 +466,7 @@ async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180):
                     stable_count = 0
             elif stage == "error":
                 return f"Error: {result.get('error', 'unknown')}"
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
     return last_response or "(z.ai 超时未响应)"
 
 
@@ -603,23 +603,26 @@ async def run_bridge(profile_id, agent_port, db_path):
                 except Exception:
                     pass
 
-            # Wait for response
+            # Wait for response (poll every 3s, max 180s)
             response = await zai_wait_for_response(session, agent_base, profile_id)
             log(profile_id, f"z.ai response: {str(response)[:80]}...")
 
-            # Hide AICQ status bar (send stream_end to clear thinking state)
+            # Send response back via AICQ as a stream (so the status bar
+            # is properly cleared and the message renders correctly).
+            # 1. Send the response text as a stream chunk
+            # 2. End the stream (this hides the status bar + finalizes msg)
             if core and from_id:
                 try:
+                    await core.send_stream_chunk(from_id, "text", str(response))
                     await core.send_stream_end(from_id)
-                except Exception:
-                    pass
-
-            # Send response back via AICQ
-            try:
-                await core.send_message(from_id, str(response))
-                log(profile_id, f"response sent to {from_id}")
-            except Exception as e:
-                log(profile_id, f"send_message error: {e}")
+                    log(profile_id, f"response streamed to {from_id}")
+                except Exception as e:
+                    log(profile_id, f"stream send failed ({e}), falling back to send_message")
+                    try:
+                        await core.send_message(from_id, str(response))
+                        log(profile_id, f"response sent to {from_id}")
+                    except Exception as e2:
+                        log(profile_id, f"send_message error: {e2}")
     finally:
         await session.close()
 
