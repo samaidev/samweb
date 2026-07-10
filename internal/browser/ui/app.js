@@ -39,6 +39,7 @@ const el = {
   omnibox: document.getElementById('omnibox'),
   bookmark: document.getElementById('bookmark-btn'),
   openDirect: document.getElementById('open-direct-btn'),
+  omniboxSuggestions: document.getElementById('omnibox-suggestions'),
   history: document.getElementById('history-btn'),
   bookmarks: document.getElementById('bookmarks-btn'),
   engine: document.getElementById('engine-btn'),
@@ -103,14 +104,45 @@ function bindEvents() {
   el.omnibox.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      submitOmnibox();
+      const sel = getSelectedSuggestion();
+      if (sel) {
+        navigateToSuggestion(sel, /*direct=*/e.shiftKey);
+      } else {
+        submitOmnibox();
+      }
     } else if (e.key === 'Escape') {
+      hideSuggestions();
       const t = activeTab();
       if (t) el.omnibox.value = displayURL(t.url);
       el.omnibox.blur();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      moveSuggestionSelection(1);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveSuggestionSelection(-1);
+    } else if (e.key === 'Tab') {
+      // Tab on a suggestion completes the omnibox with that URL
+      const sel = getSelectedSuggestion();
+      if (sel && sel.url) {
+        e.preventDefault();
+        el.omnibox.value = sel.url;
+        renderSuggestions(el.omnibox.value);
+      }
     }
   });
-  el.omnibox.addEventListener('focus', () => el.omnibox.select());
+  el.omnibox.addEventListener('input', () => renderSuggestions(el.omnibox.value));
+  el.omnibox.addEventListener('focus', () => {
+    el.omnibox.select();
+    // Show suggestions on focus if there's history
+    if (!el.omnibox.value) {
+      renderSuggestions('');
+    }
+  });
+  el.omnibox.addEventListener('blur', () => {
+    // Delay hiding so click on suggestion registers first
+    setTimeout(() => hideSuggestions(), 180);
+  });
   el.omnibox.addEventListener('mousedown', (e) => {
     // Single-click anywhere in the omnibox selects all, Chrome-style.
     if (document.activeElement !== el.omnibox) {
@@ -223,6 +255,7 @@ function activeTab() {
 function submitOmnibox() {
   const input = el.omnibox.value.trim();
   if (!input) return;
+  hideSuggestions();
   resolveOmnibox(input).then(url => navigate(url));
 }
 
@@ -379,6 +412,7 @@ async function openDirect() {
     el.omnibox.focus();
     return;
   }
+  hideSuggestions();
   let url;
   try {
     url = await resolveOmnibox(input);
@@ -410,6 +444,148 @@ async function openDirect() {
     el.openDirect.style.opacity = '';
     el.openDirect.disabled = false;
   }
+}
+
+// ----------------------------- Omnibox Suggestions -----------------------------
+// Suggestions dropdown: shows matching history + bookmark URLs as the
+// user types in the omnibox. Arrow keys navigate, Enter navigates to
+// the selected suggestion, Shift+Enter opens it via "直接打开"
+// (bypassing the iframe, useful for z.ai login).
+
+let _suggestionState = { items: [], selectedIdx: -1 };
+
+function buildSuggestions(query) {
+  const q = query.trim().toLowerCase();
+  const seen = new Set();
+  const out = [];
+
+  // Helper to add a suggestion if not already present
+  function add(url, title, source) {
+    if (!url || url === 'about:newtab' || url === 'about:blank') return;
+    if (seen.has(url)) return;
+    if (q && !url.toLowerCase().includes(q) && !(title || '').toLowerCase().includes(q)) return;
+    seen.add(url);
+    out.push({ url, title: title || '', source });
+  }
+
+  // 1) Bookmarks (highest priority)
+  for (const b of state.bookmarks) {
+    add(b.url, b.title, 'bookmark');
+  }
+  // 2) History (most recent first)
+  for (const h of state.history) {
+    add(h.url, '', 'history');
+  }
+
+  // Sort: exact prefix match first, then bookmark-before-history,
+  // then by original order (history is already most-recent-first).
+  if (q) {
+    out.sort((a, b) => {
+      const aPrefix = a.url.toLowerCase().startsWith(q) ? 0 : 1;
+      const bPrefix = b.url.toLowerCase().startsWith(q) ? 0 : 1;
+      if (aPrefix !== bPrefix) return aPrefix - bPrefix;
+      const aBook = a.source === 'bookmark' ? 0 : 1;
+      const bBook = b.source === 'bookmark' ? 0 : 1;
+      if (aBook !== bBook) return aBook - bBook;
+      return 0;
+    });
+  } else {
+    // No query: history first (most recent), then bookmarks
+    out.sort((a, b) => {
+      const aBook = a.source === 'bookmark' ? 1 : 0;
+      const bBook = b.source === 'bookmark' ? 1 : 0;
+      return aBook - bBook;
+    });
+  }
+
+  return out.slice(0, 10);
+}
+
+function renderSuggestions(query) {
+  const items = buildSuggestions(query);
+  _suggestionState.items = items;
+  _suggestionState.selectedIdx = -1;
+
+  if (items.length === 0) {
+    hideSuggestions();
+    return;
+  }
+
+  const html = items.map((item, i) => {
+    const iconSvg = item.source === 'bookmark'
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>';
+    const titleOrUrl = item.title || item.url;
+    const urlPart = item.title ? `<span class="sug-url">${escapeHtml(item.url)}</span>` : '';
+    return `<div class="omnibox-suggestion" data-idx="${i}" data-url="${escapeAttr(item.url)}">
+      <span class="sug-icon">${iconSvg}</span>
+      <span class="sug-text">${escapeHtml(titleOrUrl)}</span>
+      ${urlPart}
+      <span class="sug-direct" title="Shift+Enter 用直接打开">直接打开</span>
+    </div>`;
+  }).join('');
+  el.omniboxSuggestions.innerHTML = html;
+  el.omniboxSuggestions.classList.remove('hidden');
+
+  // Attach click handlers
+  el.omniboxSuggestions.querySelectorAll('.omnibox-suggestion').forEach(node => {
+    node.addEventListener('mousedown', (e) => {
+      e.preventDefault(); // keep omnibox focused
+      const idx = parseInt(node.dataset.idx, 10);
+      if (!isNaN(idx) && _suggestionState.items[idx]) {
+        // Left click = normal navigate; middle click (button===1) = direct open
+        navigateToSuggestion(_suggestionState.items[idx], /*direct=*/e.button === 1 || e.shiftKey);
+      }
+    });
+    node.addEventListener('contextmenu', (e) => e.preventDefault());
+  });
+}
+
+function hideSuggestions() {
+  el.omniboxSuggestions.classList.add('hidden');
+  el.omniboxSuggestions.innerHTML = '';
+  _suggestionState.items = [];
+  _suggestionState.selectedIdx = -1;
+}
+
+function getSelectedSuggestion() {
+  if (_suggestionState.selectedIdx < 0) return null;
+  return _suggestionState.items[_suggestionState.selectedIdx] || null;
+}
+
+function moveSuggestionSelection(delta) {
+  if (_suggestionState.items.length === 0) return;
+  _suggestionState.selectedIdx += delta;
+  if (_suggestionState.selectedIdx < 0) _suggestionState.selectedIdx = _suggestionState.items.length - 1;
+  if (_suggestionState.selectedIdx >= _suggestionState.items.length) _suggestionState.selectedIdx = 0;
+  // Update DOM
+  el.omniboxSuggestions.querySelectorAll('.omnibox-suggestion').forEach((node, i) => {
+    node.classList.toggle('selected', i === _suggestionState.selectedIdx);
+    if (i === _suggestionState.selectedIdx) {
+      node.scrollIntoView({ block: 'nearest' });
+    }
+  });
+}
+
+function navigateToSuggestion(item, direct) {
+  hideSuggestions();
+  el.omnibox.value = item.url;
+  el.omnibox.blur();
+  if (direct) {
+    // Use the "直接打开" path (bypass iframe, for z.ai etc.)
+    openDirect();
+  } else {
+    submitOmnibox();
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+function escapeAttr(s) {
+  return escapeHtml(s);
 }
 
 // ----------------------------- Bookmarks -----------------------------
