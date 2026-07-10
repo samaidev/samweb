@@ -761,22 +761,43 @@ func (b *WailsBackend) SaveCurrentCookiesToProfile(ctx context.Context, name str
         if err != nil {
                 return agent.ProfileInfo{}, err
         }
-        // Also dump localStorage from the current page (z.ai stores its
-        // login JWT in localStorage, not cookies). Group by origin.
+        // Also dump localStorage. z.ai stores its login JWT in localStorage,
+        // not cookies — so without localStorage the profile is useless.
+        //
+        // If we're currently on the samweb UI (wails.localhost), we can't
+        // read z.ai's localStorage directly (it's origin-scoped). So we
+        // temporarily navigate to https://chat.z.ai, read its localStorage,
+        // then navigate back. This makes "返回 SamWeb → 保存 profile"
+        // work correctly.
         b.cdpMu.RLock()
         c := b.cdpClient
         b.cdpMu.RUnlock()
         if c != nil {
+                origin, _ := c.CurrentOrigin()
+                if origin == "http://wails.localhost" || origin == "" {
+                        // Navigate to z.ai to read its localStorage
+                        log.Printf("[browser] saving profile: navigating to z.ai to dump localStorage")
+                        _ = c.EnablePage()
+                        _ = c.Navigate("https://chat.z.ai/")
+                        time.Sleep(5 * time.Second)
+                }
+
+                // Now read localStorage from the current page (should be z.ai)
                 ls, lsErr := c.DumpLocalStorage()
-                if lsErr == nil && len(ls) > 0 {
-                        origin, originErr := c.CurrentOrigin()
-                        if originErr == nil && origin != "" && origin != "http://wails.localhost" {
-                                lsMap := map[string]map[string]string{origin: ls}
-                                _ = Profiles().UpdateLocalStorage(prof.ID, lsMap)
-                                log.Printf("[browser] saved %d localStorage entries for origin %s to profile %s", len(ls), origin, prof.ID)
-                        }
+                origin2, _ := c.CurrentOrigin()
+                if lsErr == nil && len(ls) > 0 && origin2 != "" && origin2 != "http://wails.localhost" {
+                        lsMap := map[string]map[string]string{origin2: ls}
+                        _ = Profiles().UpdateLocalStorage(prof.ID, lsMap)
+                        log.Printf("[browser] saved %d localStorage entries for origin %s to profile %s", len(ls), origin2, prof.ID)
                 } else if lsErr != nil {
                         log.Printf("[browser] warning: dump localStorage: %v", lsErr)
+                } else {
+                        log.Printf("[browser] warning: no localStorage to save (origin=%s, entries=%d)", origin2, len(ls))
+                }
+
+                // Navigate back to samweb UI if we navigated away
+                if origin == "http://wails.localhost" || origin == "" {
+                        _ = c.Navigate("http://wails.localhost/")
                 }
         }
         return toProfileInfo(prof), nil
