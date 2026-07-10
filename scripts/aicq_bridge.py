@@ -411,8 +411,20 @@ async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180, c
     """
     last_response = ""
     stable_count = 0
-    for attempt in range(max_wait // 5):
+    for attempt in range(max_wait // 3):
         result = await zai_eval(session, agent_base, """(function(){
+            // Check if z.ai is still thinking/executing (loading indicators)
+            var body = document.body ? document.body.innerText : '';
+            var isThinking = /思考中|生成中|正在|loading|思考过程/.test(body) &&
+                document.querySelector('[class*="loading"], [class*="spinner"], [class*="thinking"], [class*="generating"]');
+            // Check for stop button visibility (z.ai shows stop btn while generating)
+            var stopBtns = document.querySelectorAll('button[class*="stop"], button[title*="停止"], button[title*="Stop"], button[aria-label*="stop"]');
+            var zaiGenerating = false;
+            for (var i = 0; i < stopBtns.length; i++) {
+                var r = stopBtns[i].getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) { zaiGenerating = true; break; }
+            }
+
             var sels = [
                 '[class*="chat-assistant"]',
                 '[class*="assistant-message"]',
@@ -432,7 +444,7 @@ async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180, c
                 seen[k] = true;
                 return true;
             });
-            if (asst.length === 0) return JSON.stringify({stage:'waiting'});
+            if (asst.length === 0) return JSON.stringify({stage:'waiting', generating: zaiGenerating});
             var last = asst[asst.length-1];
             var ft = (last.innerText || '').trim();
             if (/回复内容为空|请稍后重试|限制沙箱|当前模型使用人数较多/.test(ft))
@@ -449,8 +461,8 @@ async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180, c
                 }
             }
             var r = ce ? (ce.innerText || '').trim() : ft;
-            if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
-            return JSON.stringify({stage:'loading'});
+            if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r, generating: zaiGenerating});
+            return JSON.stringify({stage:'loading', generating: zaiGenerating});
         })()""")
         if isinstance(result, str):
             try:
@@ -459,9 +471,11 @@ async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180, c
                 pass
         if isinstance(result, dict):
             stage = result.get("stage", "")
+            generating = result.get("generating", False)
             if stage == "responding":
                 resp_text = result.get("response", "")
-                if resp_text == last_response:
+                # Only count as stable if z.ai is NOT still generating
+                if resp_text == last_response and not generating:
                     stable_count += 1
                     if stable_count >= 2:
                         log(profile_id, f"response ready ({len(resp_text)} chars)")
@@ -469,6 +483,13 @@ async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180, c
                 else:
                     last_response = resp_text
                     stable_count = 0
+                    # If z.ai is still generating, update status bar
+                    if generating and core and from_id:
+                        try:
+                            await core.send_stream_chunk(from_id, "thinking",
+                                f"z.ai 正在执行... ({len(resp_text)} 字)")
+                        except Exception:
+                            pass
             elif stage == "error":
                 return f"Error: {result.get('error', 'unknown')}"
 
