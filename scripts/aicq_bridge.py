@@ -556,6 +556,21 @@ async def run_bridge(profile_id, agent_port, db_path):
             content = msg["content"]
             log(profile_id, f"message from {from_id}: {content[:80]}...")
 
+            # "/new" command: delete old chats + create a new z.ai chat,
+            # then wait for the next message (don't send "/new" to z.ai).
+            if content.strip().lower() == "/new":
+                log(profile_id, f"/new command — creating new z.ai chat")
+                # Delete all existing chats
+                await zai_delete_all_chats(session, agent_base, profile_id)
+                # Create a new chat
+                new_id = await zai_new_chat(session, agent_base, profile_id)
+                if new_id:
+                    chat_map[from_id] = new_id
+                    await core.send_message(from_id, "✅ 已新建会话，请发送消息")
+                else:
+                    await core.send_message(from_id, "⚠️ 新建会话失败，请重试")
+                continue
+
             # Default: continue in the same z.ai chat for this friend
             # (context retention). Only create a new chat if we don't
             # have one yet for this friend.
