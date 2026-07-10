@@ -511,6 +511,11 @@ async def run_bridge(profile_id, agent_port, db_path):
 
         # Step 3: Set up message queue + handler
         message_queue = asyncio.Queue()
+        # Map: AICQ friend_id → z.ai chat_id (for context retention).
+        # Default behavior: subsequent messages from the same friend
+        # continue in the same z.ai chat. "点加号" (new chat) is a
+        # separate action not yet implemented via AICQ.
+        chat_map = {}
 
         async def on_message(msg):
             try:
@@ -551,12 +556,17 @@ async def run_bridge(profile_id, agent_port, db_path):
             content = msg["content"]
             log(profile_id, f"message from {from_id}: {content[:80]}...")
 
-            # Every AICQ message gets a fresh z.ai chat: delete all old
-            # chats, then create a new one. This matches the "点加号新建会话"
-            # behavior — each AICQ message is treated as a standalone query.
-            log(profile_id, "cleaning up old chats before new message...")
-            await zai_delete_all_chats(session, agent_base, profile_id)
-            await zai_new_chat(session, agent_base, profile_id)
+            # Default: continue in the same z.ai chat for this friend
+            # (context retention). Only create a new chat if we don't
+            # have one yet for this friend.
+            chat_id = chat_map.get(from_id)
+            if chat_id:
+                log(profile_id, f"continuing chat {chat_id} for {from_id}")
+            else:
+                # First message from this friend — create a new chat
+                chat_id = await zai_new_chat(session, agent_base, profile_id)
+                if chat_id:
+                    chat_map[from_id] = chat_id
 
             # Type + send (with high-traffic retry)
             ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content)
