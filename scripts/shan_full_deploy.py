@@ -15,6 +15,7 @@ from shan_lib.ssh import open_ssh, run
 FILES = [
     ("/home/z/my-project/samweb/internal/browser/browser.go",        "C:/samweb/internal/browser/browser.go"),
     ("/home/z/my-project/samweb/internal/browser/wails_backend.go",  "C:/samweb/internal/browser/wails_backend.go"),
+    ("/home/z/my-project/samweb/internal/browser/profiles.go",       "C:/samweb/internal/browser/profiles.go"),
     ("/home/z/my-project/samweb/internal/agent/server.go",           "C:/samweb/internal/agent/server.go"),
     ("/home/z/my-project/samweb/internal/agent/backend.go",          "C:/samweb/internal/agent/backend.go"),
     ("/home/z/my-project/samweb/internal/agent/mock_backend.go",     "C:/samweb/internal/agent/mock_backend.go"),
