@@ -287,6 +287,30 @@ async def zai_new_chat(session, agent_base, profile_id):
     return chat_id
 
 
+async def zai_select_first_chat(session, agent_base, profile_id):
+    """Click the first chat in the sidebar to select it. Returns the
+    chat_id from the URL, or None if no chats exist."""
+    result = await zai_eval(session, agent_base, """(function(){
+        // Chat rows are buttons containing .chatItemMenu
+        var rows = document.querySelectorAll('button:has(.chatItemMenu)');
+        if (rows.length === 0) {
+            // Fallback: look for chat links
+            rows = document.querySelectorAll('a[href*="/c/"]');
+        }
+        if (rows.length === 0) return JSON.stringify({found: false});
+        // Click the first one
+        rows[0].click();
+        return JSON.stringify({found: true});
+    })()""")
+    await asyncio.sleep(3)
+    # Get chat_id from URL
+    state = await zai_eval(session, agent_base, "window.location.href")
+    chat_id = None
+    if isinstance(state, str) and "/c/" in state:
+        chat_id = state.split("/c/")[-1].split("/")[0].split("?")[0]
+    return chat_id
+
+
 async def zai_dismiss_usage_limit_popup(session, agent_base, profile_id):
     """Check if z.ai is showing a usage limit popup. If so, click '好的'
     to dismiss it. Returns True if a popup was found and dismissed."""
@@ -770,16 +794,26 @@ async def run_bridge(profile_id, agent_port, db_path):
         # Step 1: Switch to Agent mode
         await zai_switch_to_agent_mode(session, agent_base, profile_id)
 
-        # Step 2: Delete all existing chats
-        await zai_delete_all_chats(session, agent_base, profile_id)
+        # Step 2: Select the first existing chat (don't delete any).
+        # AICQ messages will continue in this chat. Only "/new" creates
+        # a fresh chat.
+        log(profile_id, "selecting first existing chat...")
+        first_chat_id = await zai_select_first_chat(session, agent_base, profile_id)
+        if first_chat_id:
+            log(profile_id, f"selected chat: {first_chat_id}")
+        else:
+            log(profile_id, "no existing chat, will create new one on first message")
 
         # Step 3: Set up message queue + handler
         message_queue = asyncio.Queue()
         # Map: AICQ friend_id → z.ai chat_id (for context retention).
         # Default behavior: subsequent messages from the same friend
-        # continue in the same z.ai chat. "点加号" (new chat) is a
-        # separate action not yet implemented via AICQ.
+        # continue in the same z.ai chat. "/new" creates a fresh chat.
         chat_map = {}
+        if first_chat_id:
+            # Pre-populate chat_map for the owner (1000008) so the first
+            # message continues in the selected chat.
+            chat_map["1000008"] = first_chat_id
 
         async def on_message(msg):
             try:
