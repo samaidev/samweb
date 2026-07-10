@@ -39,26 +39,26 @@ import aiohttp
 # When z.ai shows "用量限制", we delete all chats, send a random greeting,
 # wait for a normal reply, then delete chats again and send the real message.
 GREETINGS = [
-    "你好，今天天气怎么样？",
-    "嗨，最近有什么有趣的事吗？",
-    "你好，能推荐一本书吗？",
-    "你好，今天过得怎么样？",
-    "嗨，最近有什么好看的剧？",
-    "你好，能帮我出个主意吗？",
-    "你好，今天心情不太好，能陪我聊聊吗？",
-    "嗨，你有什么拿手菜推荐？",
-    "你好，最近有什么好玩的游戏？",
-    "你好，能给我讲个笑话吗？",
-    "嗨，今天学到了什么新知识？",
-    "你好，有什么好看的纪录片推荐？",
-    "你好，最近有什么科技新闻？",
-    "嗨，你觉得人工智能未来会怎样？",
-    "你好，今天有什么值得开心的事？",
-    "你好，最近睡眠质量不太好，怎么办？",
-    "嗨，有什么提高效率的小技巧？",
-    "你好，最近有什么新出的电影？",
-    "你好，你觉得养猫还是养狗好？",
-    "嗨，今天有什么美好的发现吗？",
+    "你好呀，今天天气真不错，适合出门散散步放松一下心情",
+    "嗨，最近工作挺忙的，有什么好听的音乐推荐一下吗？",
+    "你好，今天读了一本很有意思的书，想和你分享一下读后感",
+    "你好呀，最近有什么好看的电影推荐吗？想周末去电影院",
+    "嗨，今天学会了一道新菜，感觉味道还不错，你要听听吗？",
+    "你好，最近开始健身了，有什么适合初学者的运动建议吗？",
+    "你好呀，今天在路上看到一只很可爱的猫咪，心情都好了",
+    "嗨，最近有什么有趣的展览或者活动可以去看看的吗？",
+    "你好，今天和朋友聊了很久，感觉人生还是充满希望的",
+    "你好呀，最近在学一门新语言，有什么好的学习方法推荐吗？",
+    "嗨，今天喝了一杯很好喝的咖啡，整个人都精神了不少呢",
+    "你好，最近有什么好看的电视剧推荐吗？想追一部新剧",
+    "你好呀，今天去公园散步了，感觉大自然真的很治愈心灵",
+    "嗨，最近在研究理财，有什么适合新手的投资建议吗？",
+    "你好，今天做了一顿丰盛的晚餐，家人都说很好吃很开心",
+    "你好呀，最近有什么好听的播客节目推荐吗？想通勤时听",
+    "嗨，今天看到一篇很有启发的文章，想和你讨论一下观点",
+    "你好，最近在装修房子，有什么简约风格的搭配建议吗？",
+    "你好呀，今天去了一家新开的咖啡店，环境很好氛围很棒",
+    "嗨，最近有什么值得去的旅游目的地推荐吗？想计划出行",
 ]
 
 # Keywords that indicate z.ai usage limit / rate limit error
@@ -414,9 +414,10 @@ async def zai_bypass_usage_limit(session, agent_base, profile_id, core, from_id,
                     # Check if this is also a limit error
                     if is_usage_limit_error(resp):
                         log(profile_id, "bypass: greeting also hit limit, trying again with different greeting")
-                        # Delete + try another greeting
+                        # Delete + re-switch Agent mode + try another greeting
                         await zai_dismiss_usage_limit_popup(session, agent_base, profile_id)
                         await zai_delete_all_chats(session, agent_base, profile_id)
+                        await zai_switch_to_agent_mode(session, agent_base, profile_id)
                         greeting = random.choice(GREETINGS)
                         log(profile_id, f"bypass: retry with: {greeting}")
                         await zai_new_chat(session, agent_base, profile_id)
