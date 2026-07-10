@@ -349,6 +349,10 @@ async def zai_bypass_usage_limit(session, agent_base, profile_id, core, from_id,
     log(profile_id, "bypass: deleting all chats")
     await zai_delete_all_chats(session, agent_base, profile_id)
 
+    # Step 2b: Re-switch to Agent mode (deleting chats may reset to Chat mode)
+    log(profile_id, "bypass: re-switching to Agent mode")
+    await zai_switch_to_agent_mode(session, agent_base, profile_id)
+
     # Step 3: Send a random greeting
     greeting = random.choice(GREETINGS)
     log(profile_id, f"bypass: sending greeting: {greeting}")
@@ -380,10 +384,18 @@ async def zai_bypass_usage_limit(session, agent_base, profile_id, core, from_id,
             }
             var seen = {};
             asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+            // Exclude user messages (z.ai uses class "chat-user")
+            asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
             if (asst.length === 0) return JSON.stringify({stage:'waiting'});
             var last = asst[asst.length-1];
             var ft = (last.innerText || '').trim();
-            var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+            // If last element itself has 'prose' class, use its innerText directly
+            // (z.ai's chat-assistant has class "chat-assistant ... markdown-prose")
+            var lastClass = (last.className||'').toString();
+            var ce = null;
+            if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {
+                ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+            }
             if (!ce) { var ds = last.querySelectorAll('div');
                 for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
                 if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
@@ -422,9 +434,11 @@ async def zai_bypass_usage_limit(session, agent_base, profile_id, core, from_id,
         log(profile_id, "bypass: timeout waiting for greeting reply")
         return False
 
-    # Step 5: Delete all chats again
+    # Step 5: Delete all chats again + re-switch to Agent mode
     log(profile_id, "bypass: deleting chats after greeting reply")
     await zai_delete_all_chats(session, agent_base, profile_id)
+    log(profile_id, "bypass: re-switching to Agent mode (2nd)")
+    await zai_switch_to_agent_mode(session, agent_base, profile_id)
     await zai_new_chat(session, agent_base, profile_id)
 
     log(profile_id, "bypass: complete, ready to re-send original message")
@@ -619,12 +633,20 @@ async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180, c
                 seen[k] = true;
                 return true;
             });
+            // Exclude user messages (z.ai uses class "chat-user")
+            asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
             if (asst.length === 0) return JSON.stringify({stage:'waiting', generating: zaiGenerating});
             var last = asst[asst.length-1];
             var ft = (last.innerText || '').trim();
             if (/回复内容为空|请稍后重试|限制沙箱|当前模型使用人数较多/.test(ft))
                 return JSON.stringify({stage:'error', error: ft.slice(0,200)});
-            var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+            // If last element itself has 'prose' class, use its innerText directly
+            // (z.ai's chat-assistant has class "chat-assistant ... markdown-prose")
+            var lastClass = (last.className||'').toString();
+            var ce = null;
+            if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {
+                ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+            }
             if (!ce) {
                 var ds = last.querySelectorAll('div');
                 for (var i = ds.length-1; i >= 0; i--) {
@@ -909,7 +931,13 @@ async def run_bridge(profile_id, agent_port, db_path):
                     var ft = (last.innerText || '').trim();
                     if (/回复内容为空|请稍后重试|限制沙箱|当前模型使用人数较多/.test(ft))
                         return JSON.stringify({stage:'error', error: ft.slice(0,200)});
-                    var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+                    // If last element itself has 'prose' class, use its innerText directly
+            // (z.ai's chat-assistant has class "chat-assistant ... markdown-prose")
+            var lastClass = (last.className||'').toString();
+            var ce = null;
+            if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {
+                ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+            }
                     if (!ce) {
                         var ds = last.querySelectorAll('div');
                         for (var i = ds.length-1; i >= 0; i--) {
@@ -1060,10 +1088,18 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 }
                                 var seen = {};
                                 asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+            // Exclude user messages (z.ai uses class "chat-user")
+            asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
                                 if (asst.length === 0) return JSON.stringify({stage:'waiting'});
                                 var last = asst[asst.length-1];
                                 var ft = (last.innerText || '').trim();
-                                var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+                                // If last element itself has 'prose' class, use its innerText directly
+            // (z.ai's chat-assistant has class "chat-assistant ... markdown-prose")
+            var lastClass = (last.className||'').toString();
+            var ce = null;
+            if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {
+                ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+            }
                                 if (!ce) { var ds = last.querySelectorAll('div');
                                     for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
                                     if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
@@ -1077,7 +1113,26 @@ async def run_bridge(profile_id, agent_port, db_path):
                             if isinstance(recheck, dict):
                                 rtext = recheck.get("response", "")
                                 if rtext and rtext != current_text:
-                                    # New content after 30s! z.ai was still working.
+                                    # Check if new content is a usage limit error
+                                    if is_usage_limit_error(rtext):
+                                        log(profile_id, f"usage limit detected in fallback! ({len(rtext)} chars): {rtext[:60]}")
+                                        bypass_ok = await zai_bypass_usage_limit(
+                                            session, agent_base, profile_id, core, from_id, content)
+                                        if bypass_ok:
+                                            log(profile_id, "bypass succeeded, re-sending original message")
+                                            ok2, _ = await zai_type_and_send(
+                                                session, agent_base, profile_id, content, core, from_id)
+                                            if ok2:
+                                                last_sent_text = ""
+                                                stable_count = 0
+                                                continue
+                                        else:
+                                            if core and from_id:
+                                                await core.send_stream_chunk(from_id, "text",
+                                                    "❌ 用量限制，自动绕过失败，请稍后重试")
+                                                await core.send_stream_end(from_id)
+                                            break
+                                    # New non-limit content after 30s!
                                     log(profile_id, f"new content after 30s! ({len(rtext)} chars, was {len(current_text)})")
                                     if core and from_id:
                                         try:
@@ -1085,7 +1140,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                                         except: pass
                                     last_sent_text = rtext
                                     stable_count = 0
-                                    continue  # go back to normal polling
+                                    continue
                         elif stable_count == 5:
                             # 2nd fallback: wait 30s more, then re-check
                             log(profile_id, f"stable {stable_count}, waiting 30s before re-check (2nd fallback)...")
@@ -1104,10 +1159,18 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 }
                                 var seen = {};
                                 asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+            // Exclude user messages (z.ai uses class "chat-user")
+            asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
                                 if (asst.length === 0) return JSON.stringify({stage:'waiting'});
                                 var last = asst[asst.length-1];
                                 var ft = (last.innerText || '').trim();
-                                var ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+                                // If last element itself has 'prose' class, use its innerText directly
+            // (z.ai's chat-assistant has class "chat-assistant ... markdown-prose")
+            var lastClass = (last.className||'').toString();
+            var ce = null;
+            if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {
+                ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+            }
                                 if (!ce) { var ds = last.querySelectorAll('div');
                                     for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
                                     if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
@@ -1121,6 +1184,23 @@ async def run_bridge(profile_id, agent_port, db_path):
                             if isinstance(recheck, dict):
                                 rtext = recheck.get("response", "")
                                 if rtext and rtext != current_text:
+                                    if is_usage_limit_error(rtext):
+                                        log(profile_id, f"usage limit in 2nd fallback! ({len(rtext)} chars)")
+                                        bypass_ok = await zai_bypass_usage_limit(
+                                            session, agent_base, profile_id, core, from_id, content)
+                                        if bypass_ok:
+                                            ok2, _ = await zai_type_and_send(
+                                                session, agent_base, profile_id, content, core, from_id)
+                                            if ok2:
+                                                last_sent_text = ""
+                                                stable_count = 0
+                                                continue
+                                        else:
+                                            if core and from_id:
+                                                await core.send_stream_chunk(from_id, "text",
+                                                    "❌ 用量限制，自动绕过失败，请稍后重试")
+                                                await core.send_stream_end(from_id)
+                                            break
                                     log(profile_id, f"new content after 2nd 30s! ({len(rtext)} chars)")
                                     if core and from_id:
                                         try:
