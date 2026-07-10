@@ -557,14 +557,21 @@ func (b *WailsBackend) SwitchToProfile(ctx context.Context, id string) error {
         log.Printf("[browser] injected %d cookies from profile %s", len(prof.Cookies), id)
 
         // Set skip flag so the next CDPNavigateTop to an external site
-        // doesn't clear storage again. 2 skips: one for our internal
-        // navigate to inject localStorage, one for the user's subsequent
-        // "直接打开".
+        // doesn't clear storage again (which would wipe the cookies we
+        // just injected + any localStorage). 1 skip is enough for
+        // profiles without localStorage (only the user's "直接打开"
+        // needs to be skipped). For profiles WITH localStorage, we need
+        // 2 skips: one for our internal navigate to inject localStorage,
+        // one for the user's subsequent "直接打开".
+        b.skipClearMu.Lock()
         if len(prof.LocalStorage) > 0 {
-                b.skipClearMu.Lock()
                 b.skipNextClearOnNav = 2
-                b.skipClearMu.Unlock()
+        } else {
+                b.skipNextClearOnNav = 1
+        }
+        b.skipClearMu.Unlock()
 
+        if len(prof.LocalStorage) > 0 {
                 // localStorage must be injected on the target origin.
                 // Navigate there, write localStorage, then navigate back.
                 go func() {
