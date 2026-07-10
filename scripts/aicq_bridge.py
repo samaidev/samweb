@@ -112,35 +112,42 @@ async def zai_switch_to_agent_mode(session, agent_base, profile_id):
 
 
 async def zai_delete_all_chats(session, agent_base, profile_id):
-    """Delete all existing chats in the z.ai sidebar."""
+    """Delete all existing chats in the z.ai sidebar.
+
+    z.ai sidebar structure:
+      <button class="w-full flex justify-between...">  ← chat row (clickable)
+        <div class="text-left...truncate">今天星期几？</div>  ← chat title
+        <button class="chatItemMenu invisible group-hover:visible">  ← menu btn
+          <button title="Chat Menu">...</button>
+        </button>
+      </button>
+
+    Delete flow: hover chat row → click chatItemMenu → click "删除" in popup.
+    """
     log(profile_id, "deleting all existing chats...")
     deleted = 0
-    for attempt in range(50):  # max 50 chats
-        # Find the first chat item's delete/menu button
+    for attempt in range(30):  # max 30 chats
+        # Step 1: Find the first chat row, hover it, click its menu button
         result = await zai_eval(session, agent_base, """(function(){
-            // z.ai chat items are typically in the sidebar with hover-triggered
-            // menu buttons. Try multiple selectors.
-            var items = document.querySelectorAll('[class*="chat-item"], [class*="conversation-item"], [class*="history-item"]');
-            if (items.length === 0) {
-                // Try finding by href pattern
-                items = document.querySelectorAll('a[href*="/c/"]');
-            }
-            if (items.length === 0) return JSON.stringify({done: true, remaining: 0});
+            // Chat rows are buttons with class "w-full flex justify-between"
+            // that contain a child with class "chatItemMenu"
+            var menuBtns = document.querySelectorAll('.chatItemMenu');
+            if (menuBtns.length === 0) return JSON.stringify({done: true});
 
-            var first = items[0];
-            // Hover to reveal menu buttons
-            first.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
-            first.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+            // Get the first chat row (parent of the menu button)
+            var firstMenu = menuBtns[0];
+            var row = firstMenu.closest('button');
+            if (!row) return JSON.stringify({error: 'no row'});
 
-            // Look for delete/menu button within or near the item
-            var menuBtn = first.querySelector('[class*="menu"], [class*="delete"], [class*="more"], button[title*="删除"], button[title*="Delete"], button[aria-label*="delete"]');
-            if (menuBtn) {
-                menuBtn.click();
-                return JSON.stringify({clicked: 'menu', remaining: items.length});
-            }
-            // Right-click for context menu
-            first.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, button: 2}));
-            return JSON.stringify({clicked: 'contextmenu', remaining: items.length, text: first.innerText.slice(0,40)});
+            // Hover the row to make the menu button visible/clickable
+            row.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
+            row.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+            row.dispatchEvent(new MouseEvent('mousemove', {bubbles: true, clientX: 100, clientY: 100}));
+
+            return JSON.stringify({
+                chat_text: row.innerText.trim().slice(0, 40),
+                remaining: menuBtns.length,
+            });
         })()""")
         if isinstance(result, str):
             try:
@@ -159,16 +166,35 @@ async def zai_delete_all_chats(session, agent_base, profile_id):
             log(profile_id, f"deleted {deleted} chats, none remaining")
             return deleted
 
-        # After clicking menu/contextmenu, look for delete option
+        chat_text = result.get("chat_text", "?")
+        log(profile_id, f"deleting chat: {chat_text} ({remaining} remaining)")
+
+        # Step 2: Click the menu button (now visible after hover)
+        await asyncio.sleep(0.5)
+        click_result = await zai_eval(session, agent_base, """(function(){
+            var menuBtns = document.querySelectorAll('.chatItemMenu');
+            if (menuBtns.length === 0) return 'no_menu';
+            // Force-click the first menu button (it may have 'invisible' class
+            // but we can still click it programmatically)
+            var btn = menuBtns[0];
+            btn.click();
+            // Also try clicking the inner "Chat Menu" button
+            var inner = btn.querySelector('button');
+            if (inner) inner.click();
+            return 'clicked';
+        })()""")
+
+        # Step 3: Wait for popup menu, find and click "删除"
         await asyncio.sleep(0.5)
         del_result = await zai_eval(session, agent_base, """(function(){
-            // Look for delete option in popup menu
-            var popups = document.querySelectorAll('[class*="popup"], [class*="menu"], [class*="dropdown"], [role="menu"]');
-            for (var p of popups) {
-                var items = p.querySelectorAll('div, button, span, li');
-                for (var el of items) {
-                    var t = (el.innerText || '').trim();
-                    if (t === '删除' || t === 'Delete' || t === '删除会话') {
+            // Look for delete option in any popup/dropdown/menu
+            var allEls = document.querySelectorAll('div, button, span, li, a');
+            for (var i = 0; i < allEls.length; i++) {
+                var el = allEls[i];
+                var t = (el.innerText || '').trim();
+                if (t === '删除' || t === 'Delete' || t === '删除会话' || t === '删除对话') {
+                    var r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) {
                         el.click();
                         return 'deleted';
                     }
@@ -176,6 +202,7 @@ async def zai_delete_all_chats(session, agent_base, profile_id):
             }
             return 'no_delete_option';
         })()""")
+
         if del_result == 'deleted':
             deleted += 1
             # Confirm dialog if any
@@ -184,7 +211,7 @@ async def zai_delete_all_chats(session, agent_base, profile_id):
                 var btns = document.querySelectorAll('button');
                 for (var b of btns) {
                     var t = (b.innerText || '').trim();
-                    if (t === '确认' || t === '确定' || t === 'Confirm' || t === 'OK') {
+                    if (t === '确认' || t === '确定' || t === 'Confirm' || t === 'OK' || t === '删除') {
                         b.click(); return 'confirmed';
                     }
                 }
@@ -192,15 +219,13 @@ async def zai_delete_all_chats(session, agent_base, profile_id):
             })()""")
             await asyncio.sleep(1)
         else:
-            # Try keyboard shortcut: hover item + Delete key
-            log(profile_id, f"attempt {attempt}: menu click didn't find delete, trying alternative")
+            log(profile_id, f"  delete option not found ({del_result}), trying next")
             await asyncio.sleep(1)
-            # If we can't delete via menu, just move on
-            if attempt > 5:
+            if attempt > 10:
                 log(profile_id, f"deleted {deleted} chats, stopping (can't delete more)")
                 return deleted
 
-    log(profile_id, f"deleted {deleted} chats (max attempts reached)")
+    log(profile_id, f"deleted {deleted} chats (max attempts)")
     return deleted
 
 
