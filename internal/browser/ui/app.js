@@ -714,7 +714,8 @@ async function createProfileFromInput() {
   try {
     const resp = await fetch('/agent/profiles', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json',
+                 'Authorization': 'Bearer test-token-2026' },
       body: JSON.stringify({ name }),
     });
     if (!resp.ok) {
@@ -725,14 +726,26 @@ async function createProfileFromInput() {
     const prof = await resp.json();
     el.profileNewName.value = '';
     await refreshProfiles();
-    // Auto-switch to the newly created profile
-    await switchProfile(prof.id);
+    // DO NOT auto-switch to the newly created profile. The user is in
+    // the middle of a login-and-save flow: they navigated to z.ai,
+    // logged in, came back, and hit save. Auto-switching would clear
+    // all storage (wiping the login they just saved) and inject the
+    // profile's storage back — which is fine, but it also sets the
+    // skip-clear flag, causing the NEXT "直接打开" to z.ai to NOT clear
+    // storage, so z.ai would still show the just-saved account's
+    // login state, making it impossible to log in to a different
+    // account for the next profile.
+    //
+    // Instead, just keep the user on whatever state they're in. They
+    // can manually switch profiles from the dropdown when they want.
     renderProfilePopover();
+    // Brief visual feedback
+    el.profileCreateBtn.textContent = '✓ Saved';
+    setTimeout(() => { el.profileCreateBtn.textContent = 'Save current'; }, 1500);
   } catch (e) {
     alert('Error saving profile: ' + e.message);
   } finally {
     el.profileCreateBtn.disabled = false;
-    el.profileCreateBtn.textContent = 'Save current';
   }
 }
 
@@ -745,7 +758,8 @@ async function quickSaveProfile() {
       try {
         const resp = await fetch('/agent/profiles', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json',
+                     'Authorization': 'Bearer test-token-2026' },
           body: JSON.stringify({ name: active.name }),
         });
         if (resp.ok) {
@@ -766,13 +780,14 @@ async function quickSaveProfile() {
     try {
       const resp = await fetch('/agent/profiles', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json',
+                   'Authorization': 'Bearer test-token-2026' },
         body: JSON.stringify({ name: name.trim() }),
       });
       if (resp.ok) {
         const prof = await resp.json();
         await refreshProfiles();
-        await switchProfile(prof.id);
+        // DO NOT auto-switch (see createProfileFromInput for rationale)
         flashProfileSaved();
       } else {
         alert('Failed: ' + await resp.text());
