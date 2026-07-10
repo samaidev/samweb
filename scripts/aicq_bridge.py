@@ -63,7 +63,8 @@ GREETINGS = [
 
 # Keywords that indicate z.ai usage limit / rate limit error
 LIMIT_KEYWORDS = ["用量限制", "使用限制", "额度", "请求过于频繁", "rate limit",
-                  "使用次数", "今日额度", "限制沙箱", "用量已达"]
+                  "使用次数", "今日额度", "限制沙箱", "用量已达",
+                  "用量已超出", "超出个人限制", "Agent 用量", "回复内容为空"]
 
 sys.path.insert(0, os.path.expanduser(
     "~/AppData/Local/Programs/Python/Python313/Lib/site-packages"))
@@ -967,7 +968,28 @@ async def run_bridge(profile_id, agent_port, db_path):
                         break
 
                 if stage == "responding" and current_text:
-                    # Send new/updated text as a stream chunk
+                    # Check if this is actually a usage limit error
+                    # (z.ai returns limit error as a short "response")
+                    if is_usage_limit_error(current_text):
+                        log(profile_id, f"usage limit detected in response: {current_text[:80]}")
+                        bypass_ok = await zai_bypass_usage_limit(
+                            session, agent_base, profile_id, core, from_id, content)
+                        if bypass_ok:
+                            log(profile_id, "bypass succeeded, re-sending original message")
+                            ok2, _ = await zai_type_and_send(
+                                session, agent_base, profile_id, content, core, from_id)
+                            if ok2:
+                                last_sent_text = ""
+                                stable_count = 0
+                                continue
+                        else:
+                            if core and from_id:
+                                await core.send_stream_chunk(from_id, "text",
+                                    "❌ 用量限制，自动绕过失败，请稍后重试")
+                                await core.send_stream_end(from_id)
+                            break
+
+                    # Normal response — send new/updated text as a stream chunk
                     if current_text != last_sent_text:
                         # Send the full current text (aicq.me replaces the
                         # streaming text, not appends)
