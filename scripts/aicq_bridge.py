@@ -256,8 +256,43 @@ async def zai_new_chat(session, agent_base, profile_id):
     return chat_id
 
 
+async def zai_dismiss_high_traffic_popup(session, agent_base, profile_id):
+    """Check if z.ai is showing a high-traffic popup. If so, click '取消'
+    to dismiss it. Returns True if a popup was found and dismissed."""
+    result = await zai_eval(session, agent_base, """(function(){
+        // Look for the high-traffic modal
+        var modals = document.querySelectorAll('[class*="modal"], [role="dialog"]');
+        for (var i = 0; i < modals.length; i++) {
+            var el = modals[i];
+            var text = el.innerText || '';
+            if (text.indexOf('高峰') >= 0 || text.indexOf('人数较多') >= 0 ||
+                text.indexOf('稍后再试') >= 0 || text.indexOf('繁忙') >= 0) {
+                // Found the high-traffic popup — click "取消"
+                var btns = el.querySelectorAll('button');
+                for (var j = 0; j < btns.length; j++) {
+                    var t = (btns[j].innerText || '').trim();
+                    if (t === '取消' || t === 'Cancel') {
+                        btns[j].click();
+                        return 'dismissed';
+                    }
+                }
+                return 'found_but_no_cancel';
+            }
+        }
+        return 'no_popup';
+    })()""")
+    if result == 'dismissed':
+        log(profile_id, "high-traffic popup dismissed (clicked 取消)")
+        await asyncio.sleep(1)
+        return True
+    return False
+
+
 async def zai_type_and_send(session, agent_base, profile_id, message):
-    """Type a message into z.ai chat input and click send."""
+    """Type a message into z.ai chat input and click send.
+    Handles high-traffic popups: if z.ai shows "高峰时段" popup after
+    sending, clicks "取消", waits 20s, and retries. Up to 20 retries.
+    """
     # Wait for chat input
     for attempt in range(10):
         ready = await zai_eval(session, agent_base, """(function(){
@@ -289,36 +324,76 @@ async def zai_type_and_send(session, agent_base, profile_id, message):
     }})()""")
     await asyncio.sleep(1)
 
-    # Click send
-    send_result = await zai_eval(session, agent_base, """(function(){
-        var sels = [
-            'button.sendMessageButton',
-            'button[class*="sendMessageButton"]',
-            'button[class*="send-button"]',
-            'button[type="submit"]',
-            'button[aria-label*="Send"]',
-            'button[aria-label*="发送"]'
-        ];
-        for (var i = 0; i < sels.length; i++) {
-            var btn = document.querySelector(sels[i]);
-            if (btn && !btn.disabled) { btn.click(); return 'sent:' + sels[i]; }
-        }
-        var input = document.querySelector('#chat-input, textarea, div[contenteditable="true"]');
-        if (input) {
-            var parent = input.closest('form, div[class*="input"], div[class*="chat"]');
-            if (parent) {
-                var btns = parent.querySelectorAll('button');
-                for (var j = 0; j < btns.length; j++) {
-                    if (!btns[j].disabled && btns[j].getBoundingClientRect().width > 0) {
-                        btns[j].click(); return 'sent:fallback_' + j;
+    # Click send — with high-traffic retry (max 20 attempts, 20s apart)
+    for send_attempt in range(20):
+        # First dismiss any existing popup
+        await zai_dismiss_high_traffic_popup(session, agent_base, profile_id)
+
+        # Re-type if input was cleared (z.ai may clear on failed send)
+        if send_attempt > 0:
+            await zai_eval(session, agent_base, f"""(function(){{
+                var el = document.querySelector('#chat-input, textarea[class*="chat-input"], div[contenteditable="true"]');
+                if (!el) return 'no_input';
+                if (el.contentEditable === 'true') {{
+                    el.focus();
+                    document.execCommand('insertText', false, {json.dumps(message)});
+                    return 'retyped_ce';
+                }}
+                var proto = el.tagName === 'TEXTAREA' ?
+                    window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                setter.call(el, {json.dumps(message)});
+                el.dispatchEvent(new InputEvent('input', {{bubbles: true}}));
+                return 'retyped';
+            }})()""")
+            await asyncio.sleep(1)
+
+        # Click send
+        send_result = await zai_eval(session, agent_base, """(function(){
+            var sels = [
+                'button.sendMessageButton',
+                'button[class*="sendMessageButton"]',
+                'button[class*="send-button"]',
+                'button[type="submit"]',
+                'button[aria-label*="Send"]',
+                'button[aria-label*="发送"]'
+            ];
+            for (var i = 0; i < sels.length; i++) {
+                var btn = document.querySelector(sels[i]);
+                if (btn && !btn.disabled) { btn.click(); return 'sent:' + sels[i]; }
+            }
+            var input = document.querySelector('#chat-input, textarea, div[contenteditable="true"]');
+            if (input) {
+                var parent = input.closest('form, div[class*="input"], div[class*="chat"]');
+                if (parent) {
+                    var btns = parent.querySelectorAll('button');
+                    for (var j = 0; j < btns.length; j++) {
+                        if (!btns[j].disabled && btns[j].getBoundingClientRect().width > 0) {
+                            btns[j].click(); return 'sent:fallback_' + j;
+                        }
                     }
                 }
             }
-        }
-        return 'no_send_btn';
-    })()""")
-    log(profile_id, f"send: {send_result}")
-    return True, send_result
+            return 'no_send_btn';
+        })()""")
+
+        if send_result and send_result.startswith('sent'):
+            log(profile_id, f"send attempt {send_attempt+1}: {send_result}")
+            # Wait a moment, then check for high-traffic popup
+            await asyncio.sleep(3)
+            if await zai_dismiss_high_traffic_popup(session, agent_base, profile_id):
+                # Popup appeared — wait 20s and retry
+                log(profile_id, f"high-traffic popup detected, waiting 20s before retry ({send_attempt+1}/20)")
+                await asyncio.sleep(20)
+                continue
+            else:
+                # No popup — send succeeded
+                return True, send_result
+        else:
+            log(profile_id, f"send attempt {send_attempt+1} failed: {send_result}")
+            await asyncio.sleep(5)
+
+    return False, "max retries exceeded (high traffic)"
 
 
 async def zai_wait_for_response(session, agent_base, profile_id, max_wait=180):
