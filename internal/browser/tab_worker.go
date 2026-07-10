@@ -198,6 +198,13 @@ func runTabWorker(opts Options) error {
 // ~/.samweb/profiles.json and injects them into the current CDP page.
 // This is used on first launch of a tab worker for a profile — after
 // that, the user-data-dir persists the login state.
+//
+// Order matters: cookies can be set anytime, but localStorage must be
+// written while on the same origin. So we:
+//  1. Inject cookies (works from any origin)
+//  2. Navigate to the target origin (e.g. https://chat.z.ai/)
+//  3. Write localStorage via Runtime.evaluate
+//  4. Reload the page so z.ai picks up the localStorage token
 func injectProfileStorage(c *cdp.Client, profileID string) {
         prof, ok, err := Profiles().Get(profileID)
         if err != nil || !ok {
@@ -205,28 +212,46 @@ func injectProfileStorage(c *cdp.Client, profileID string) {
                 return
         }
 
-        // Inject cookies
+        // 1. Inject cookies
         for _, ck := range prof.Cookies {
                 _ = c.SetCookie(ck)
         }
         log.Printf("[tab] injected %d cookies from profile %s", len(prof.Cookies), profileID)
 
-        // Inject localStorage (navigate to each origin, write entries)
+        // 2. Inject localStorage (must be on the same origin)
         if len(prof.LocalStorage) > 0 {
                 for origin, entries := range prof.LocalStorage {
+                        log.Printf("[tab] injecting localStorage for origin %s (%d entries)", origin, len(entries))
+                        // Navigate to the origin
                         if err := c.Navigate(origin + "/"); err != nil {
                                 log.Printf("[tab] warning: navigate to %s for localStorage: %v", origin, err)
                                 continue
                         }
-                        time.Sleep(3 * time.Second)
+                        // Wait for the page to load (even if it shows login page,
+                        // we just need the origin to be correct for localStorage writes)
+                        time.Sleep(4 * time.Second)
+
+                        // Write localStorage entries
                         if err := c.RestoreLocalStorage(entries); err != nil {
                                 log.Printf("[tab] warning: restore localStorage for %s: %v", origin, err)
-                        } else {
-                                log.Printf("[tab] restored %d localStorage entries for origin %s", len(entries), origin)
+                                continue
                         }
+                        log.Printf("[tab] restored %d localStorage entries for origin %s", len(entries), origin)
+
+                        // Verify the token was written
+                        token, _ := c.Send("Runtime.evaluate", map[string]interface{}{
+                                "expression":    "localStorage.getItem('token') || ''",
+                                "returnByValue": true,
+                        })
+                        log.Printf("[tab] verified localStorage token after restore: %s", string(token)[:100])
                 }
-                // Navigate back to the start URL
+                // Reload the page so z.ai picks up the localStorage token
+                log.Printf("[tab] reloading page to apply localStorage")
                 _ = c.Navigate("about:blank")
+                time.Sleep(1 * time.Second)
+                _ = c.Navigate("https://chat.z.ai/")
+                time.Sleep(3 * time.Second)
+                log.Printf("[tab] page reloaded with localStorage injected")
         }
 }
 
