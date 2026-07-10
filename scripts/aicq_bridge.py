@@ -288,7 +288,7 @@ async def zai_dismiss_high_traffic_popup(session, agent_base, profile_id):
     return False
 
 
-async def zai_type_and_send(session, agent_base, profile_id, message):
+async def zai_type_and_send(session, agent_base, profile_id, message, core=None, from_id=None):
     """Type a message into z.ai chat input and click send.
     Handles high-traffic popups: if z.ai shows "高峰时段" popup after
     sending, clicks "取消", waits 20s, and retries. Up to 20 retries.
@@ -382,7 +382,13 @@ async def zai_type_and_send(session, agent_base, profile_id, message):
             # Wait a moment, then check for high-traffic popup
             await asyncio.sleep(3)
             if await zai_dismiss_high_traffic_popup(session, agent_base, profile_id):
-                # Popup appeared — wait 20s and retry
+                # Popup appeared — update AICQ status bar + wait 20s + retry
+                if core and from_id:
+                    try:
+                        await core.send_stream_chunk(from_id, "thinking",
+                            f"高峰期，正在重试... ({send_attempt+1}/20)")
+                    except Exception:
+                        pass
                 log(profile_id, f"high-traffic popup detected, waiting 20s before retry ({send_attempt+1}/20)")
                 await asyncio.sleep(20)
                 continue
@@ -584,15 +590,29 @@ async def run_bridge(profile_id, agent_port, db_path):
                     chat_map[from_id] = chat_id
 
             # Type + send (with high-traffic retry)
-            ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content)
+            ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content, core, from_id)
             if not ok:
                 log(profile_id, f"failed to send to z.ai: {send_result}")
                 await core.send_message(from_id, f"发送失败: {send_result}")
                 continue
 
+            # Update AICQ status bar: waiting for z.ai response
+            if core and from_id:
+                try:
+                    await core.send_stream_chunk(from_id, "thinking", "正在等待 z.ai 响应...")
+                except Exception:
+                    pass
+
             # Wait for response
             response = await zai_wait_for_response(session, agent_base, profile_id)
             log(profile_id, f"z.ai response: {str(response)[:80]}...")
+
+            # Hide AICQ status bar (send stream_end to clear thinking state)
+            if core and from_id:
+                try:
+                    await core.send_stream_end(from_id)
+                except Exception:
+                    pass
 
             # Send response back via AICQ
             try:
