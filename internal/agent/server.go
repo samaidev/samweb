@@ -108,6 +108,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/network/clear", s.handleNetworkClear)
         mux.HandleFunc("/agent/cookies", s.handleCookies)
         mux.HandleFunc("/agent/cdp-mouse", s.handleCDPRawMouse)
+        mux.HandleFunc("/agent/cdp-navigate-top", s.handleCDPNavigateTop)
         mux.HandleFunc("/agent/breakthrough", s.handleBreakthrough)
 
         mux.HandleFunc("/agent/eval", s.handleEval)
@@ -561,6 +562,31 @@ func (s *Server) handleCDPRawMouse(w http.ResponseWriter, r *http.Request) {
         ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
         defer cancel()
         if err := s.backend.CDPRawMouse(ctx, opts); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleCDPNavigateTop makes the WebView2 top-level page navigate to
+// url. POST /agent/cdp-navigate-top {"url":"https://chat.z.ai"}.
+// Used by the "直接打开" UI button and by the "← Back to SamWeb"
+// floating button injected on cross-origin pages.
+func (s *Server) handleCDPNavigateTop(w http.ResponseWriter, r *http.Request) {
+        var body struct {
+                URL string `json:"url"`
+        }
+        if err := readJSON(r, &body); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if body.URL == "" {
+                writeError(w, http.StatusBadRequest, "missing url")
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        if err := s.backend.CDPNavigateTop(ctx, body.URL); err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return
         }

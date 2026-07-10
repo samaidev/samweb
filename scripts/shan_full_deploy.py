@@ -13,21 +13,23 @@ from shan_lib.ssh import open_ssh, run
 
 # (local path, remote path)
 FILES = [
-    ("/home/z/my-project/samweb/internal/browser/browser.go",        "C:/samweb/internal/browser/browser.go"),
-    ("/home/z/my-project/samweb/internal/browser/wails_backend.go",  "C:/samweb/internal/browser/wails_backend.go"),
-    ("/home/z/my-project/samweb/internal/browser/profiles.go",       "C:/samweb/internal/browser/profiles.go"),
-    ("/home/z/my-project/samweb/internal/agent/server.go",           "C:/samweb/internal/agent/server.go"),
-    ("/home/z/my-project/samweb/internal/agent/backend.go",          "C:/samweb/internal/agent/backend.go"),
-    ("/home/z/my-project/samweb/internal/agent/mock_backend.go",     "C:/samweb/internal/agent/mock_backend.go"),
-    ("/home/z/my-project/samweb/internal/cdp/client.go",             "C:/samweb/internal/cdp/client.go"),
-    ("/home/z/my-project/samweb/internal/browser/ui/index.html",     "C:/samweb/internal/browser/ui/index.html"),
-    ("/home/z/my-project/samweb/internal/browser/ui/app.js",         "C:/samweb/internal/browser/ui/app.js"),
+    ("/home/z/my-project/internal/browser/browser.go",        "C:/samweb/internal/browser/browser.go"),
+    ("/home/z/my-project/internal/browser/wails_backend.go",  "C:/samweb/internal/browser/wails_backend.go"),
+    ("/home/z/my-project/internal/browser/profiles.go",       "C:/samweb/internal/browser/profiles.go"),
+    ("/home/z/my-project/internal/agent/server.go",           "C:/samweb/internal/agent/server.go"),
+    ("/home/z/my-project/internal/agent/backend.go",          "C:/samweb/internal/agent/backend.go"),
+    ("/home/z/my-project/internal/agent/mock_backend.go",     "C:/samweb/internal/agent/mock_backend.go"),
+    ("/home/z/my-project/internal/cdp/client.go",             "C:/samweb/internal/cdp/client.go"),
+    ("/home/z/my-project/internal/browser/ui/index.html",     "C:/samweb/internal/browser/ui/index.html"),
+    ("/home/z/my-project/internal/browser/ui/app.js",         "C:/samweb/internal/browser/ui/app.js"),
 ]
 
 
 def main():
     verbose = "-v" in sys.argv
-    client, proc, _ = open_ssh(verbose=verbose)
+    # Force aitun (direct SSH to shan.aitun.cc:22 is unreliable).
+    os.environ.setdefault('AITUN_PATH', '/home/z/.venv/bin/aitun')
+    client, proc, _ = open_ssh(verbose=verbose, use_aitun=True)
     try:
         # 1) Upload all files
         print(f"[1] uploading {len(FILES)} files ...")

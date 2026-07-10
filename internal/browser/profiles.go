@@ -22,6 +22,12 @@ type Profile struct {
         Cookies []cdp.CDPCookie `json:"cookies"` // snapshot of all CDP cookies
         Created int64         `json:"created"`  // unix seconds
         Updated int64         `json:"updated"`  // unix seconds
+
+        // LocalStorage is a snapshot of localStorage entries, keyed by
+        // origin (e.g. "https://chat.z.ai"). Each value is a map of
+        // key→value strings. This is critical for sites like z.ai that
+        // store their login JWT in localStorage, not just cookies.
+        LocalStorage map[string]map[string]string `json:"local_storage,omitempty"`
 }
 
 // profilesFile is the on-disk JSON file for profile storage.
@@ -261,6 +267,25 @@ func (s *ProfileStore) UpdateCookies(id string, cookies []cdp.CDPCookie) error {
         for i, p := range s.state.Profiles {
                 if p.ID == id {
                         s.state.Profiles[i].Cookies = cloneCookies(cookies)
+                        s.state.Profiles[i].Updated = nowUnix()
+                        return s.save()
+                }
+        }
+        return fmt.Errorf("profile not found: %s", id)
+}
+
+// UpdateLocalStorage replaces the localStorage snapshot stored in a
+// profile. Used together with UpdateCookies when the user re-saves the
+// current state into an existing profile.
+func (s *ProfileStore) UpdateLocalStorage(id string, ls map[string]map[string]string) error {
+        if err := s.load(); err != nil {
+                return err
+        }
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        for i, p := range s.state.Profiles {
+                if p.ID == id {
+                        s.state.Profiles[i].LocalStorage = ls
                         s.state.Profiles[i].Updated = nowUnix()
                         return s.save()
                 }

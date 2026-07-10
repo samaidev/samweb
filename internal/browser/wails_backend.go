@@ -5,6 +5,8 @@ import (
         "encoding/json"
         "errors"
         "fmt"
+        "log"
+        "strings"
         "sync"
         "time"
 
@@ -29,6 +31,13 @@ type WailsBackend struct {
 
         cdpMu     sync.RWMutex
         cdpClient *cdp.Client
+
+        // skipNextClearOnNav is set by SwitchToProfile so that the
+        // next CDPNavigateTop to an external site does NOT clear storage
+        // again (SwitchToProfile already cleared + injected the profile's
+        // cookies + localStorage; clearing again would wipe the injection).
+        skipClearMu        sync.Mutex
+        skipNextClearOnNav int
 }
 
 type callbackResult struct {
@@ -200,6 +209,91 @@ func (b *WailsBackend) GetAllCookies(ctx context.Context) ([]agent.BrowserCookie
 
 func (b *WailsBackend) CDPRawMouse(ctx context.Context, opts agent.RawMouseOpts) error {
         return b.dispatchVoid(ctx, "cdpMouse", opts)
+}
+
+// CDPNavigateTop drives the WebView2 top-level page to url via CDP
+// Page.navigate. This bypasses the samweb iframe entirely, allowing
+// sites that block iframe embedding (z.ai, Google) to be loaded
+// directly. The samweb UI is gone after this call — bring it back by
+// calling CDPNavigateTop("http://wails.localhost/").
+//
+// Before navigating away, we inject a "← Back to SamWeb" floating
+// button via Page.addScriptToEvaluateOnNewDocument so the user can
+// return without external tooling.
+//
+// If navigating AWAY from samweb UI (to an external site), we clear
+// ALL browser storage (cookies, localStorage, sessionStorage, IndexedDB,
+// cache) first so the user starts with a fresh session — unless
+// skipNextClearOnNav was set by SwitchToProfile (in which case we
+// preserve the just-injected profile storage).
+func (b *WailsBackend) CDPNavigateTop(ctx context.Context, url string) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+
+        // If navigating AWAY from samweb UI, clear ALL storage so the
+        // user starts fresh (unless skip flag is set by SwitchToProfile).
+        if !strings.Contains(url, "wails.localhost") {
+                b.skipClearMu.Lock()
+                skip := b.skipNextClearOnNav
+                if skip > 0 {
+                        b.skipNextClearOnNav = skip - 1
+                }
+                b.skipClearMu.Unlock()
+                if skip > 0 {
+                        log.Printf("[browser] skip ClearDataForOrigin (profile just switched) before direct-navigate to %s", url)
+                } else {
+                        if err := c.ClearDataForOrigin("*", "all"); err != nil {
+                                log.Printf("[browser] warning: ClearDataForOrigin before navigate: %v", err)
+                        } else {
+                                log.Printf("[browser] cleared all storage before direct-navigate to %s", url)
+                        }
+                }
+        }
+
+        // Inject the back-button script (runs on every new document load).
+        backButtonScript := `
+(function(){
+  if (window.top !== window) return;
+  if (location.href.indexOf('wails.localhost') >= 0) return;
+  if (window.__samwebBackButton) return;
+  window.__samwebBackButton = true;
+  var btn = document.createElement('div');
+  btn.id = '__samweb_back_btn';
+  btn.textContent = '\u2190 \u8fd4\u56de SamWeb';
+  btn.style.cssText = [
+    'position:fixed','top:12px','right:12px','z-index:2147483647',
+    'padding:8px 14px','background:#1a73e8','color:#fff',
+    'font:600 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+    'border-radius:20px','cursor:pointer','box-shadow:0 2px 8px rgba(0,0,0,0.3)',
+    'user-select:none','-webkit-user-select:none','border:none'
+  ].join(';');
+  btn.onmouseenter = function(){ btn.style.background = '#1557b0'; };
+  btn.onmouseleave = function(){ btn.style.background = '#1a73e8'; };
+  btn.onclick = function(){
+    btn.textContent = '\u8fd4\u56de\u4e2d\u2026';
+    window.location.href = 'http://wails.localhost/';
+  };
+  function mount(){
+    if (document.body) {
+      document.body.appendChild(btn);
+    } else {
+      setTimeout(mount, 50);
+    }
+  }
+  mount();
+})();
+`
+        if _, err := c.AddScriptToEvaluateOnNewDocument(backButtonScript); err != nil {
+                return fmt.Errorf("inject back-button script: %w", err)
+        }
+        if err := c.EnablePage(); err != nil {
+                log.Printf("[browser] Page.enable warning: %v", err)
+        }
+        return c.Navigate(url)
 }
 
 func (b *WailsBackend) BreakthroughSlider(ctx context.Context) (string, bool, error) {
@@ -385,6 +479,24 @@ func (b *WailsBackend) SaveCurrentCookiesToProfile(ctx context.Context, name str
         if err != nil {
                 return agent.ProfileInfo{}, err
         }
+        // Also dump localStorage from the current page (z.ai stores its
+        // login JWT in localStorage, not cookies). Group by origin.
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c != nil {
+                ls, lsErr := c.DumpLocalStorage()
+                if lsErr == nil && len(ls) > 0 {
+                        origin, originErr := c.CurrentOrigin()
+                        if originErr == nil && origin != "" && origin != "http://wails.localhost" {
+                                lsMap := map[string]map[string]string{origin: ls}
+                                _ = Profiles().UpdateLocalStorage(prof.ID, lsMap)
+                                log.Printf("[browser] saved %d localStorage entries for origin %s to profile %s", len(ls), origin, prof.ID)
+                        }
+                } else if lsErr != nil {
+                        log.Printf("[browser] warning: dump localStorage: %v", lsErr)
+                }
+        }
         return toProfileInfo(prof), nil
 }
 
@@ -412,9 +524,24 @@ func (b *WailsBackend) SwitchToProfile(ctx context.Context, id string) error {
         if err := Profiles().Activate(id); err != nil {
                 return err
         }
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+
+        // Clear ALL storage (cookies + localStorage + IndexedDB + cache)
+        // for all origins — gives the new profile a clean slate.
+        if err := c.ClearDataForOrigin("*", "all"); err != nil {
+                log.Printf("[browser] warning: ClearDataForOrigin on switch: %v", err)
+        }
+
         if id == "" {
+                log.Printf("[browser] switched to empty profile (cleared all storage)")
                 return nil
         }
+
         prof, ok, err := Profiles().Get(id)
         if err != nil {
                 return err
@@ -422,18 +549,41 @@ func (b *WailsBackend) SwitchToProfile(ctx context.Context, id string) error {
         if !ok {
                 return fmt.Errorf("profile not found: %s", id)
         }
-        if err := b.ResetCookies(ctx); err != nil {
-                return fmt.Errorf("reset cookies: %w", err)
-        }
-        b.cdpMu.RLock()
-        c := b.cdpClient
-        b.cdpMu.RUnlock()
-        if c == nil {
-                return fmt.Errorf("CDP client not connected")
-        }
+
+        // Inject cookies.
         for _, ck := range prof.Cookies {
                 _ = c.SetCookie(ck)
         }
+        log.Printf("[browser] injected %d cookies from profile %s", len(prof.Cookies), id)
+
+        // Set skip flag so the next CDPNavigateTop to an external site
+        // doesn't clear storage again. 2 skips: one for our internal
+        // navigate to inject localStorage, one for the user's subsequent
+        // "直接打开".
+        if len(prof.LocalStorage) > 0 {
+                b.skipClearMu.Lock()
+                b.skipNextClearOnNav = 2
+                b.skipClearMu.Unlock()
+
+                // localStorage must be injected on the target origin.
+                // Navigate there, write localStorage, then navigate back.
+                go func() {
+                        for origin, entries := range prof.LocalStorage {
+                                if err := c.Navigate(origin + "/"); err != nil {
+                                        log.Printf("[browser] warning: navigate to %s for localStorage: %v", origin, err)
+                                        continue
+                                }
+                                time.Sleep(3 * time.Second)
+                                if err := c.RestoreLocalStorage(entries); err != nil {
+                                        log.Printf("[browser] warning: restore localStorage for %s: %v", origin, err)
+                                } else {
+                                        log.Printf("[browser] restored %d localStorage entries for origin %s", len(entries), origin)
+                                }
+                        }
+                        _ = c.Navigate("http://wails.localhost/")
+                }()
+        }
+
         return nil
 }
 

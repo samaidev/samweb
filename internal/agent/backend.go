@@ -55,6 +55,12 @@ type Backend interface {
         // CDPRawMouse sends a single CDP Input.dispatchMouseEvent.
         CDPRawMouse(ctx context.Context, opts RawMouseOpts) error
 
+        // CDPNavigateTop makes the WebView2 top-level page navigate to
+        // url, bypassing the samweb iframe. Used for sites that block
+        // iframe embedding (z.ai, Google, etc.). The samweb UI is gone
+        // after this — bring it back with CDPNavigateTop("http://wails.localhost/").
+        CDPNavigateTop(ctx context.Context, url string) error
+
         // BreakthroughSlider automatically detects and bypasses slider
         // captchas on the current page using the breakthrough framework.
         // Returns the challenge name and success status.

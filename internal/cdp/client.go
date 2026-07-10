@@ -268,6 +268,154 @@ func (c *Client) ClearCookies() error {
         _, err := c.send("Network.clearBrowserCookies", nil)
         return err
 }
+
+// Navigate tells the WebView2 top-level page to navigate to url.
+// Use this to bypass the samweb iframe (and the X-Frame-Options / CSP
+// restrictions that block iframe embedding of sites like z.ai).
+// The samweb UI is gone after this call — bring it back by navigating
+// to http://wails.localhost/.
+func (c *Client) Navigate(url string) error {
+        _, err := c.send("Page.navigate", map[string]interface{}{"url": url})
+        return err
+}
+
+// AddScriptToEvaluateOnNewDocument injects a script that will run on
+// every new document load (including cross-origin navigations). Used
+// to inject the "← Back to SamWeb" floating button when the user
+// "直接打开"s a site that can't be iframed.
+func (c *Client) AddScriptToEvaluateOnNewDocument(script string) (string, error) {
+        resp, err := c.send("Page.addScriptToEvaluateOnNewDocument",
+                map[string]interface{}{"source": script})
+        if err != nil {
+                return "", err
+        }
+        var out struct {
+                Identifier string `json:"identifier"`
+        }
+        _ = json.Unmarshal(resp, &out)
+        return out.Identifier, nil
+}
+
+// RemoveScriptToEvaluateOnNewDocument removes a previously injected
+// script by its identifier.
+func (c *Client) RemoveScriptToEvaluateOnNewDocument(identifier string) error {
+        _, err := c.send("Page.removeScriptToEvaluateOnNewDocument",
+                map[string]interface{}{"identifier": identifier})
+        return err
+}
+
+// EnablePage turns on Page domain events (needed before Page.navigate
+// in some WebView2 versions).
+func (c *Client) EnablePage() error {
+        _, err := c.send("Page.enable", nil)
+        return err
+}
+
+// ClearDataForOrigin wipes ALL storage (cookies, localStorage,
+// sessionStorage, IndexedDB, cache, service workers) for the given
+// origin. Pass origin="*" to clear for all origins. This is the
+// nuclear option — needed because sites like z.ai store their login
+// token in localStorage, not just cookies, so Network.clearBrowserCookies
+// alone is not enough to log out.
+//
+// storageTypes: "all" (default), or a comma-separated subset:
+// "cookies,local_storage,session_storage,indexeddb,cache_storage".
+func (c *Client) ClearDataForOrigin(origin string, storageTypes string) error {
+        if storageTypes == "" {
+                storageTypes = "all"
+        }
+        _, err := c.send("Storage.clearDataForOrigin", map[string]interface{}{
+                "origin":       origin,
+                "storageTypes": storageTypes,
+        })
+        return err
+}
+
+// DumpLocalStorage reads all localStorage entries for the current page
+// via Runtime.evaluate. Returns a map of key→value. Must be called
+// when the page is currently loaded on the origin whose localStorage
+// you want to dump.
+func (c *Client) DumpLocalStorage() (map[string]string, error) {
+        script := `(function(){
+          var out = {};
+          try {
+            for (var i = 0; i < localStorage.length; i++) {
+              var k = localStorage.key(i);
+              out[k] = localStorage.getItem(k) || '';
+            }
+          } catch(e) {}
+          return out;
+        })()`
+        resp, err := c.send("Runtime.evaluate", map[string]interface{}{
+                "expression":    script,
+                "returnByValue": true,
+        })
+        if err != nil {
+                return nil, err
+        }
+        var wrap struct {
+                Result struct {
+                        Value map[string]string `json:"value"`
+                } `json:"result"`
+        }
+        if err := json.Unmarshal(resp, &wrap); err != nil {
+                return nil, fmt.Errorf("decode dump localStorage: %w", err)
+        }
+        return wrap.Result.Value, nil
+}
+
+// RestoreLocalStorage writes the given key→value entries into the
+// current page's localStorage via Runtime.evaluate. Must be called
+// when the page is currently loaded on the target origin (e.g.
+// navigate to https://chat.z.ai first, then call this).
+func (c *Client) RestoreLocalStorage(entries map[string]string) error {
+        entriesJSON, err := json.Marshal(entries)
+        if err != nil {
+                return fmt.Errorf("marshal localStorage entries: %w", err)
+        }
+        script := fmt.Sprintf(`(function(){
+          var entries = %s;
+          try {
+            for (var k in entries) {
+              if (entries.hasOwnProperty(k)) {
+                localStorage.setItem(k, entries[k]);
+              }
+            }
+          } catch(e) { return false; }
+          return true;
+        })()`, string(entriesJSON))
+        _, err = c.send("Runtime.evaluate", map[string]interface{}{
+                "expression":    script,
+                "returnByValue": true,
+        })
+        return err
+}
+
+// CurrentOrigin returns the origin (scheme://host[:port]) of the
+// currently-loaded page. Used to key localStorage snapshots by origin.
+func (c *Client) CurrentOrigin() (string, error) {
+        script := `(function(){
+          try {
+            return location.origin;
+          } catch(e) { return ''; }
+        })()`
+        resp, err := c.send("Runtime.evaluate", map[string]interface{}{
+                "expression":    script,
+                "returnByValue": true,
+        })
+        if err != nil {
+                return "", err
+        }
+        var wrap struct {
+                Result struct {
+                        Value string `json:"value"`
+                } `json:"result"`
+        }
+        if err := json.Unmarshal(resp, &wrap); err != nil {
+                return "", fmt.Errorf("decode current origin: %w", err)
+        }
+        return wrap.Result.Value, nil
+}
 // Returns the base64-encoded PNG data (CDP returns base64, not raw
 // bytes). The caller should base64-decode it.
 //

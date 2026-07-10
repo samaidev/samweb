@@ -38,6 +38,7 @@ const el = {
   omniboxIcon: document.getElementById('omnibox-icon'),
   omnibox: document.getElementById('omnibox'),
   bookmark: document.getElementById('bookmark-btn'),
+  openDirect: document.getElementById('open-direct-btn'),
   history: document.getElementById('history-btn'),
   bookmarks: document.getElementById('bookmarks-btn'),
   engine: document.getElementById('engine-btn'),
@@ -87,6 +88,7 @@ function bindEvents() {
   el.reload.addEventListener('click', () => reloadActive());
   el.home.addEventListener('click', () => navigate('about:newtab'));
   el.bookmark.addEventListener('click', () => toggleBookmark());
+  el.openDirect.addEventListener('click', () => openDirect());
   el.history.addEventListener('click', () => togglePopover('history'));
   el.bookmarks.addEventListener('click', () => togglePopover('bookmarks'));
   el.engine.addEventListener('click', () => togglePopover('engine'));
@@ -361,6 +363,53 @@ function clearHistory() {
   state.history = [];
   saveJSON('samweb.history', state.history);
   renderHistoryPopover();
+}
+
+// ----------------------------- Open Direct (bypass iframe) -----------------------------
+// openDirect makes the WebView2 top-level window navigate to the
+// omnibox URL, bypassing the samweb iframe entirely. Use this for
+// sites that block iframe embedding (z.ai, Google) — e.g. to log in
+// to z.ai and save cookies to a profile.
+//
+// The backend injects a "← 返回 SamWeb" floating button on the
+// cross-origin page so the user can come back.
+async function openDirect() {
+  const input = el.omnibox.value.trim();
+  if (!input) {
+    el.omnibox.focus();
+    return;
+  }
+  let url;
+  try {
+    url = await resolveOmnibox(input);
+  } catch (e) {
+    url = input;
+  }
+  if (!url) url = input;
+
+  if (!confirm('将离开 SamWeb UI，直接在 WebView2 顶层打开：\n\n  ' + url + '\n\n用于登录 z.ai 等不支持 iframe 嵌入的网站。\n登录完成后点右上角"← 返回 SamWeb"按钮回来，然后用"保存 profile"按钮保存 cookies。\n\n继续？')) {
+    return;
+  }
+
+  try {
+    el.openDirect.style.opacity = '0.5';
+    el.openDirect.disabled = true;
+    const r = await fetch('/agent/cdp-navigate-top', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json',
+                'Authorization': 'Bearer test-token-2026'},
+      body: JSON.stringify({url: url})
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      alert('直接打开失败：' + r.status + ' ' + text);
+    }
+  } catch (e) {
+    alert('直接打开出错：' + e.message);
+  } finally {
+    el.openDirect.style.opacity = '';
+    el.openDirect.disabled = false;
+  }
 }
 
 // ----------------------------- Bookmarks -----------------------------
@@ -807,21 +856,35 @@ function flashProfileSaved() {
 async function switchProfile(id) {
   // Don't switch if already on this profile
   if (id === state.activeProfileId && id !== '') return;
+  const prof = id ? state.profiles.find(p => p.id === id) : null;
+  const profName = prof ? prof.name : '空 profile';
+  if (!confirm('切换到 profile：' + profName + '\n\n' +
+               (id ? '将清空当前所有 cookies + localStorage，然后注入该 profile 的登录态。' :
+                     '将清空当前所有 cookies + localStorage（回到匿名状态）。') +
+               '\n\n继续？')) {
+    el.profileSelect.value = state.activeProfileId || '';
+    return;
+  }
   try {
     const resp = await fetch('/agent/profiles/switch', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json',
+                 'Authorization': 'Bearer test-token-2026' },
       body: JSON.stringify({ id }),
     });
     if (!resp.ok) {
       alert('Failed to switch profile: ' + await resp.text());
-      // Revert dropdown
       el.profileSelect.value = state.activeProfileId || '';
       return;
     }
     state.activeProfileId = id;
-    // Reload the current page so the new cookies take effect
-    reloadActive();
+    if (id) {
+      alert('已切换到 profile：' + profName + '\n\n' +
+            '后端正在注入 cookies + localStorage（如果 profile 里有 localStorage，会先跳到目标网站注入再跳回，约需 5-10 秒）。\n' +
+            '注入完成后，点"直接打开"按钮去 z.ai，应该已经是登录状态。');
+    } else {
+      alert('已切换到空 profile，所有 cookies + localStorage 已清空。');
+    }
   } catch (e) {
     alert('Error switching profile: ' + e.message);
     el.profileSelect.value = state.activeProfileId || '';

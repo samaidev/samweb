@@ -154,36 +154,61 @@ func Run(opts Options) error {
         err = wails.Run(&options.App{
                 Title:     opts.Title,
                 Width:     opts.Width,
-        // Set the backend's context (needed for WindowExecJS).
-        backend.SetContext(ctx)
-
-        // Run the wails app — configured identically to samoffice (which
-        // has working left-click). No custom Handler, no OnDomReady JS
-        // injection, with BackgroundColour.
-        err = wails.Run(&options.App{
-                Title:            opts.Title,
-                Width:            opts.Width,
-                Height:           opts.Height,
-                MinWidth:         400,
-                MinHeight:        300,
-                AssetServer:      &assetserver.Options{
+                Height:    opts.Height,
+                MinWidth:  400,
+                MinHeight: 300,
+                AssetServer: &assetserver.Options{
                         Assets: uiAssets,
+                        Handler: &uiAssetHandler{
+                                uiPort:          uiPort,
+                                engine:          engine,
+                                agentAddr:       opts.AgentAddr,
+                                callbackHandler: HandleCallbackHTTP(backend),
+                        },
                 },
-                BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
                 OnStartup: func(ctx context.Context) {
+                        // Save the context for later use.
                         backend.SetContext(ctx)
                         log.Printf("[browser] wails app started")
                 },
+                OnDomReady: func(ctx context.Context) {
+                        // Inject the agent bootstrap JS.
+                        wailsRuntime.WindowExecJS(ctx, agentJS)
+                        log.Printf("[browser] agent bootstrap JS injected")
+                },
                 Bind: []interface{}{
-                        backend,
+                        backend, // expose backend methods to JS
                 },
         })
-        engine    search.Engine
-        agentAddr string
+
+        // Shutdown.
+        _ = agentSrv.Shutdown(gracefulCtx())
+        cancel()
+        return err
+}
+
+// uiAssetHandler serves dynamic routes (/api/config, /api/resolve, /proxy,
+// /agent/callback) alongside the embedded static files. wails calls Handler
+// for every request; if it returns nil, wails falls back to serving the
+// embedded asset.
+type uiAssetHandler struct {
+        uiPort          int
+        engine          search.Engine
+        agentAddr       string
+        callbackHandler http.HandlerFunc // handles /agent/callback (JS→Go)
 }
 
 func (h *uiAssetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         switch {
+        case r.URL.Path == "/agent/callback":
+                // JS→Go callback. Must NOT be reverse-proxied to the agent
+                // server (the agent server doesn't have this route — the
+                // callback is handled in-process by the WailsBackend).
+                if h.callbackHandler != nil {
+                        h.callbackHandler(w, r)
+                } else {
+                        http.Error(w, "callback handler not configured", http.StatusServiceUnavailable)
+                }
         case r.URL.Path == "/api/config":
                 w.Header().Set("Content-Type", "application/json")
                 _ = json.NewEncoder(w).Encode(map[string]any{
@@ -352,10 +377,10 @@ func gracefulCtx() context.Context {
 // This is the same as the webview_go version, but uses fetch() to call
 // /agent/callback (on the UI server) instead of a native binding.
 func agentBootstrapJS(uiPort int) string {
-        return fmt.Sprintf(`
+        _ = uiPort
+        return `
 window.__samwebAgent = (function() {
-  var UI_PORT = %d;
-  var UI_BASE = 'http://127.0.0.1:' + UI_PORT;
+  var UI_BASE = '';  // same-origin; uiAssetHandler reverse-proxies /agent/*
   var iframe = function() { return document.getElementById('view'); };
   var iwin = function() {
     var f = iframe();
@@ -374,15 +399,15 @@ window.__samwebAgent = (function() {
   }
 
   // dispatch is the single entry point invoked from Go via wails runtime.ExecJS.
-  // Instead of using a native binding (webview.Bind), we use fetch() to POST
-  // the result back to /agent/callback on the UI server.
+  // We use same-origin fetch() to POST the result back to /agent/callback
+  // (uiAssetHandler reverse-proxies /agent/* to the agent server, but
+  // /agent/callback is handled in-process).
   function dispatch(id, method, params) {
     Promise.resolve().then(function() {
       var fn = methods[method];
       if (!fn) throw new Error('unknown agent method: ' + method);
       return fn(params || {});
     }).then(function(result) {
-      // Send result back to Go via HTTP POST
       fetch(UI_BASE + '/agent/callback', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -407,12 +432,16 @@ window.__samwebAgent = (function() {
       if (typeof window.navigate === 'function') {
         window.navigate(p.url);
       } else {
-        iframe().src = UI_BASE + '/proxy?url=' + encodeURIComponent(p.url);
+        iframe().src = '/proxy?url=' + encodeURIComponent(p.url);
       }
       return { ok: true };
     },
     navigateDirect: function(p) {
-      window.location.href = p.url;
+      var f = iframe();
+      if (f) {
+        f.removeAttribute('srcdoc');
+        f.src = p.url;
+      }
       return { ok: true };
     },
     back: function() {
@@ -461,9 +490,175 @@ window.__samwebAgent = (function() {
       var d = idoc();
       if (!d) throw new Error('document is not accessible (cross-origin or not loaded)');
       var result = (function() { return eval(p.script); }).call(d.defaultView || window);
+      if (result && typeof result.then === 'function') {
+        return result.then(function(v) { return { value: v === undefined ? null : v }; });
+      }
       return { value: result === undefined ? null : result };
+    },
+    scroll: function(p) {
+      var d = getFrameDoc();
+      var w = iwin();
+      if (p.x !== undefined && p.y !== undefined) {
+        w.scrollTo(p.x, p.y);
+      } else if (p.selector) {
+        var el = d.querySelector(p.selector);
+        if (!el) throw new Error('element not found: ' + p.selector);
+        el.scrollIntoView({block: 'start', inline: 'start'});
+      } else if (p.direction) {
+        var amt = p.amount || 400;
+        var dx = 0, dy = 0;
+        switch (p.direction) {
+          case 'down': dy = amt; break;
+          case 'up':   dy = -amt; break;
+          case 'right': dx = amt; break;
+          case 'left':  dx = -amt; break;
+        }
+        w.scrollBy(dx, dy);
+      } else {
+        throw new Error('scroll requires x,y or selector or direction');
+      }
+      return { ok: true, scrollX: w.scrollX, scrollY: w.scrollY };
+    },
+    type: function(p) {
+      var d = getFrameDoc();
+      var el;
+      if (p.selector) {
+        el = d.querySelector(p.selector);
+      } else if (p.x !== undefined && p.y !== undefined) {
+        el = d.elementFromPoint(p.x, p.y);
+      }
+      if (!el) throw new Error('element not found for type');
+      var setInputValue = null, setTextareaValue = null;
+      try {
+        setInputValue = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value').set;
+      } catch (e) {}
+      try {
+        setTextareaValue = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype, 'value').set;
+      } catch (e) {}
+      function applyValue(target, value) {
+        if (target instanceof HTMLTextAreaElement && setTextareaValue) {
+          setTextareaValue.call(target, value);
+        } else if (setInputValue) {
+          setInputValue.call(target, value);
+        } else {
+          target.value = value;
+        }
+      }
+      if (p.clear) {
+        if ('value' in el) applyValue(el, '');
+        else el.textContent = '';
+      }
+      if ('value' in el) {
+        applyValue(el, el.value + p.text);
+        el.dispatchEvent(new InputEvent('input', {bubbles: true, cancelable: true, inputType: 'insertText', data: p.text}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+      } else {
+        el.textContent += p.text;
+      }
+      return { ok: true };
+    },
+    key: function(p) {
+      var d = getFrameDoc();
+      var el = p.selector ? d.querySelector(p.selector) : d.activeElement;
+      if (!el) throw new Error('no active element and no selector');
+      el.focus();
+      var ev = new KeyboardEvent('keydown', {
+        key: p.key, bubbles: true, cancelable: true,
+        ctrlKey: (p.modifiers || []).indexOf('ctrl') >= 0,
+        shiftKey: (p.modifiers || []).indexOf('shift') >= 0,
+        altKey: (p.modifiers || []).indexOf('alt') >= 0,
+        metaKey: (p.modifiers || []).indexOf('meta') >= 0,
+      });
+      el.dispatchEvent(ev);
+      el.dispatchEvent(new KeyboardEvent('keyup', ev));
+      if (p.key.length === 1 && 'value' in el) {
+        el.value += p.key;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+      }
+      return { ok: true };
+    },
+    wait: function(p) {
+      var sel = p.selector;
+      var timeout = (p.timeoutMs || 30000);
+      var start = Date.now();
+      return new Promise(function(resolve, reject) {
+        function check() {
+          var d;
+          try { d = idoc(); } catch (e) { d = null; }
+          if (d && d.querySelector(sel)) { resolve({ok: true}); return; }
+          if (Date.now() - start > timeout) {
+            reject(new Error('timeout waiting for ' + sel));
+            return;
+          }
+          setTimeout(check, 100);
+        }
+        check();
+      });
+    },
+    elements: function(p) {
+      var d = getFrameDoc();
+      var list = d.querySelectorAll(p.selector);
+      var out = [];
+      for (var i = 0; i < list.length; i++) {
+        out.push(serializeEl(list[i]));
+      }
+      return { elements: out, count: out.length };
+    },
+    element: function(p) {
+      var d = getFrameDoc();
+      var el = d.querySelector(p.selector);
+      if (!el) throw new Error('element not found: ' + p.selector);
+      return serializeEl(el);
+    },
+    state: function() {
+      var d;
+      var url = '', title = '';
+      try { d = idoc(); if (d) { title = d.title || ''; } } catch (e) {}
+      var f = iframe();
+      if (f) {
+        try { url = f.src || ''; } catch (e) {}
+      } else {
+        try { url = window.location.href || ''; } catch (e) {}
+      }
+      var omnibox = document.getElementById('omnibox');
+      var omniboxValue = omnibox ? omnibox.value : '';
+      var tabs = [];
+      if (typeof window.getTabsState === 'function') {
+        tabs = window.getTabsState();
+      } else {
+        tabs = [{ id: 1, title: title, url: omniboxValue || url }];
+      }
+      return {
+        url: omniboxValue || url,
+        title: title,
+        tabs: tabs,
+        activeTab: typeof window.getActiveTabId === 'function' ? window.getActiveTabId() : 1,
+        canBack:   typeof window.canBack === 'function' ? window.canBack() : false,
+        canForward:typeof window.canForward === 'function' ? window.canForward() : false,
+        iframe_src: url,
+        omnibox_value: omniboxValue,
+      };
     }
   };
+
+  function serializeEl(el) {
+    var r = el.getBoundingClientRect();
+    var attrs = {};
+    for (var i = 0; i < el.attributes.length; i++) {
+      attrs[el.attributes[i].name] = el.attributes[i].value;
+    }
+    return {
+      tag: el.tagName.toLowerCase(),
+      id: el.id || '',
+      classes: Array.prototype.slice.call(el.classList),
+      x: r.left, y: r.top, width: r.width, height: r.height,
+      text: (el.innerText || '').slice(0, 500),
+      attrs: attrs,
+      html: el.outerHTML.slice(0, 2000),
+    };
+  }
 
   return { dispatch: dispatch };
 })();
@@ -473,5 +668,5 @@ window.__samwebAgentDispatch = function(id, method, paramsJSON) {
   var params = paramsJSON ? JSON.parse(paramsJSON) : {};
   window.__samwebAgent.dispatch(id, method, params);
 };
-`, uiPort)
+`
 }

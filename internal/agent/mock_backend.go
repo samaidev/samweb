@@ -268,6 +268,10 @@ func (m *MockBackend) CDPRawMouse(ctx context.Context, opts RawMouseOpts) error 
         return fmt.Errorf("CDPRawMouse not supported on mock backend")
 }
 
+func (m *MockBackend) CDPNavigateTop(ctx context.Context, url string) error {
+        return fmt.Errorf("CDPNavigateTop not supported on mock backend")
+}
+
 func (m *MockBackend) BreakthroughSlider(ctx context.Context) (string, bool, error) {
         return "", false, fmt.Errorf("BreakthroughSlider not supported on mock backend")
 }

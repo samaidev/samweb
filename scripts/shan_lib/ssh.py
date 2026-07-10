@@ -24,7 +24,7 @@ import time
 
 import paramiko
 
-AITUN = os.environ.get('AITUN_PATH', '/home/z/.local/bin/aitun')
+AITUN = os.environ.get('AITUN_PATH', '/home/z/.venv/bin/aitun')
 HOST = os.environ.get('SHAN_HOST', 'shan.aitun.cc')
 PORT = int(os.environ.get('SHAN_PORT', '22'))
 USER = os.environ.get('SHAN_USER', 'Administrator')
