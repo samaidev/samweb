@@ -280,6 +280,14 @@ func (m *MockBackend) CDPDOMText(ctx context.Context, selector string) (string, 
         return "", fmt.Errorf("CDPDOMText not supported on mock backend")
 }
 
+func (m *MockBackend) EnableSSECapture(ctx context.Context) error {
+        return fmt.Errorf("EnableSSECapture not supported on mock backend")
+}
+
+func (m *MockBackend) GetSSEMessages(ctx context.Context) ([]SSEMessage, error) {
+        return nil, fmt.Errorf("GetSSEMessages not supported on mock backend")
+}
+
 func (m *MockBackend) SpawnTab(ctx context.Context, profileID, url string) (TabWorkerInfo, error) {
         return TabWorkerInfo{}, fmt.Errorf("SpawnTab not supported on mock backend")
 }

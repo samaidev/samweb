@@ -87,6 +87,11 @@ type Backend interface {
         // CDPDOMText reads element HTML via CDP DOM domain (bypasses JS
         // thread). Used when z.ai's JS is blocked during task execution.
         CDPDOMText(ctx context.Context, selector string) (string, error)
+
+        // SSE capture: z.ai streams Agent output via SSE/WebSocket.
+        // These CDP events bypass JS thread entirely.
+        EnableSSECapture(ctx context.Context) error
+        GetSSEMessages(ctx context.Context) ([]SSEMessage, error)
         Wait(ctx context.Context, selector string, timeoutMs int) error
         Elements(ctx context.Context, selector string) ([]Element, error)
         Element(ctx context.Context, selector string) (*Element, error)

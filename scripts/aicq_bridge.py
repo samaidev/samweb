@@ -1099,13 +1099,22 @@ async def run_bridge(profile_id, agent_port, db_path):
                 except: pre_count = 0
             log(profile_id, f"assistant messages before send: {pre_count}")
 
+            # Enable SSE capture BEFORE sending — z.ai streams output via
+            # SSE/WebSocket. CDP Network events bypass JS thread entirely,
+            # so they work even when z.ai is executing long tasks (1h+).
+            try:
+                await session.post(f"{agent_base}/agent/sse-enable",
+                    json={}, timeout=aiohttp.ClientTimeout(total=10))
+                log(profile_id, "SSE capture enabled")
+            except Exception as e:
+                log(profile_id, f"warning: SSE enable failed: {e}")
+
             # Stream z.ai's response to AICQ in real-time.
-            # Poll z.ai every 3s, send new text as stream chunks.
-            # Finish when z.ai's output hasn't changed for 3 consecutive
-            # polls (9 seconds of stability).
+            # Use SSE messages as primary source (bypasses JS thread),
+            # fall back to eval/DOM when SSE has no data.
             last_sent_text = ""
             stable_count = 0
-            max_polls = 60  # 60 polls (each may take up to 5 min if z.ai JS is blocked)
+            max_polls = 120  # 120 polls × 5s = 10 min (long tasks may run 1h+)
 
             if core and from_id:
                 try:
@@ -1114,7 +1123,34 @@ async def run_bridge(profile_id, agent_port, db_path):
                     pass
 
             for poll in range(max_polls):
-                # Check if user cancelled
+                # Step 1: Check SSE messages first (bypasses JS thread)
+                try:
+                    sse_resp = await session.get(f"{agent_base}/agent/sse-messages",
+                        timeout=aiohttp.ClientTimeout(total=10))
+                    sse_data = await sse_resp.json()
+                    sse_msgs = sse_data if isinstance(sse_data, list) else []
+                    if sse_msgs:
+                        # Concatenate all new SSE data
+                        sse_text = "\n".join(m.get("data", "") for m in sse_msgs if m.get("data"))
+                        if sse_text and sse_text != last_sent_text:
+                            # Filter: only send meaningful content (skip empty/heartbeat)
+                            meaningful = [m for m in sse_msgs if len(m.get("data", "")) > 2]
+                            if meaningful:
+                                combined = "\n".join(m["data"] for m in meaningful)
+                                if combined != last_sent_text:
+                                    if core and from_id:
+                                        try:
+                                            await core.send_stream_chunk(from_id, "text", combined)
+                                        except: pass
+                                    last_sent_text = combined
+                                    stable_count = 0
+                                    log(profile_id, f"SSE streaming... ({len(combined)} chars, {len(meaningful)} msgs)")
+                                    await asyncio.sleep(5)
+                                    continue
+                except Exception:
+                    pass
+
+                # Step 2: Check if user cancelled
                 if core and from_id:
                     try:
                         if await core.is_stream_cancelled(from_id):

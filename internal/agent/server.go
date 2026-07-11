@@ -114,6 +114,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/eval", s.handleEval)
         mux.HandleFunc("/agent/cdp-eval", s.handleCDPEval)
         mux.HandleFunc("/agent/cdp-dom-text", s.handleCDPDOMText)
+        mux.HandleFunc("/agent/sse-enable", s.handleSSEEnable)
+        mux.HandleFunc("/agent/sse-messages", s.handleSSEMessages)
         mux.HandleFunc("/agent/wait", s.handleWait)
         mux.HandleFunc("/agent/elements", s.handleElements)
         mux.HandleFunc("/agent/element", s.handleElement)
@@ -730,6 +732,31 @@ func (s *Server) handleCDPDOMText(w http.ResponseWriter, r *http.Request) {
                 return
         }
         writeJSON(w, http.StatusOK, map[string]string{"html": html})
+}
+
+// handleSSEEnable enables SSE/WebSocket capture via CDP Network domain.
+// POST /agent/sse-enable
+func (s *Server) handleSSEEnable(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        if err := s.backend.EnableSSECapture(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleSSEMessages returns new SSE messages since last call.
+// GET /agent/sse-messages → [{"data":"...","timestamp":123}]
+func (s *Server) handleSSEMessages(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        msgs, err := s.backend.GetSSEMessages(ctx)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, msgs)
 }
 
 // handleBreakthrough automatically detects and bypasses slider captchas.

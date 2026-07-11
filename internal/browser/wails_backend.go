@@ -656,6 +656,34 @@ func (b *WailsBackend) CDPDOMText(ctx context.Context, selector string) (string,
         return c.GetDOMText(selector)
 }
 
+func (b *WailsBackend) EnableSSECapture(ctx context.Context) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+        return c.EnableSSECapture()
+}
+
+func (b *WailsBackend) GetSSEMessages(ctx context.Context) ([]agent.SSEMessage, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil, fmt.Errorf("CDP client not connected")
+        }
+        msgs := c.GetSSEMessages()
+        out := make([]agent.SSEMessage, len(msgs))
+        for i, m := range msgs {
+                out[i] = agent.SSEMessage{
+                        Data:      m.Data,
+                        Timestamp: m.Timestamp,
+                }
+        }
+        return out, nil
+}
+
 func (b *WailsBackend) Wait(ctx context.Context, selector string, timeoutMs int) error {
         return b.dispatchVoid(ctx, "wait", map[string]interface{}{
                 "selector":  selector,

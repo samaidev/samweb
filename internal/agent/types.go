@@ -250,3 +250,10 @@ type TabWorkerInfo struct {
 	CDPPort    int    `json:"cdp_port"`
 	PID        int    `json:"pid"`
 }
+
+// SSEMessage is a single SSE/WebSocket message captured from z.ai's
+// network stream. Used for real-time output when JS thread is blocked.
+type SSEMessage struct {
+	Data      string  `json:"data"`
+	Timestamp float64 `json:"timestamp"`
+}

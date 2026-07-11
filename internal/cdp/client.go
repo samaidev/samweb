@@ -39,6 +39,21 @@ type Client struct {
         // requestMap maps CDP requestId to the index in capturedRequests,
         // so we can update the entry when responseReceived / loadingFinished fires.
         requestMap       map[string]int
+
+        // SSE stream capture: z.ai Agent mode streams output via SSE.
+        // These events arrive via CDP WebSocket (not JS thread), so they
+        // work even when z.ai's JS is blocked during task execution.
+        sseMu       sync.Mutex
+        sseMessages []SSEMessage
+        sseEnabled  bool
+}
+
+// SSEMessage is a single Server-Sent Event message captured from the
+// network. z.ai uses SSE to stream Agent mode responses.
+type SSEMessage struct {
+        URL       string `json:"url"`
+        Data      string `json:"data"`
+        Timestamp float64 `json:"timestamp"`
 }
 
 type cdpResponse struct {
@@ -458,6 +473,41 @@ func (c *Client) Screenshot(fullPage bool) ([]byte, error) {
         return decoded, nil
 }
 
+// EnableSSECapture enables CDP Network domain + listens for SSE events.
+// z.ai Agent mode streams output via Server-Sent Events. These events
+// arrive via CDP WebSocket (not JS thread), so they work even when
+// z.ai's JS is blocked during task execution.
+func (c *Client) EnableSSECapture() error {
+        c.sseMu.Lock()
+        c.sseMessages = nil
+        c.sseEnabled = true
+        c.sseMu.Unlock()
+        // Enable Network domain (needed for eventSource events)
+        _, err := c.send("Network.enable", map[string]interface{}{
+                "maxTotalBufferSize":    50 * 1024 * 1024,
+                "maxResourceBufferSize": 10 * 1024 * 1024,
+        })
+        return err
+}
+
+// DisableSSECapture stops capturing SSE events.
+func (c *Client) DisableSSECapture() {
+        c.sseMu.Lock()
+        c.sseEnabled = false
+        c.sseMu.Unlock()
+        _, _ = c.send("Network.disable", nil)
+}
+
+// GetSSEMessages returns all captured SSE messages since the last call
+// and clears the buffer. Each call returns only NEW messages.
+func (c *Client) GetSSEMessages() []SSEMessage {
+        c.sseMu.Lock()
+        defer c.sseMu.Unlock()
+        msgs := c.sseMessages
+        c.sseMessages = nil
+        return msgs
+}
+
 // EnableNetwork enables the CDP Network domain and captures all network
 // requests with full detail (headers, cookies, response body, timing).
 // After calling this, GetCapturedRequests returns a list of all requests
@@ -734,6 +784,50 @@ func (c *Client) handleEvent(method string, params json.RawMessage) {
                 if shouldFetch {
                         go c.fetchResponseBody(ev.RequestID)
                 }
+
+        case "Network.eventSourceMessageReceived":
+                // SSE message — z.ai Agent mode streams output via SSE.
+                // This event arrives via CDP WebSocket, NOT JS thread,
+                // so it works even when z.ai's JS is blocked.
+                c.sseMu.Lock()
+                if c.sseEnabled {
+                        var ev struct {
+                                RequestID string  `json:"requestId"`
+                                Timestamp float64 `json:"timestamp"`
+                                EventName string  `json:"eventName"`
+                                EventID   string  `json:"eventId"`
+                                Data      string  `json:"data"`
+                        }
+                        if err := json.Unmarshal(params, &ev); err == nil {
+                                c.sseMessages = append(c.sseMessages, SSEMessage{
+                                        Data:      ev.Data,
+                                        Timestamp: ev.Timestamp,
+                                })
+                        }
+                }
+                c.sseMu.Unlock()
+
+        case "Network.webSocketFrameReceived":
+                // WebSocket frame — some z.ai endpoints may use WS instead of SSE.
+                c.sseMu.Lock()
+                if c.sseEnabled {
+                        var ev struct {
+                                RequestID struct {
+                                        URL string `json:"url"`
+                                } `json:"requestId"`
+                                Timestamp float64 `json:"timestamp"`
+                                Response  struct {
+                                        PayloadData string `json:"payloadData"`
+                                } `json:"response"`
+                        }
+                        if err := json.Unmarshal(params, &ev); err == nil {
+                                c.sseMessages = append(c.sseMessages, SSEMessage{
+                                        Data:      ev.Response.PayloadData,
+                                        Timestamp: ev.Timestamp,
+                                })
+                        }
+                }
+                c.sseMu.Unlock()
         }
 }
 
