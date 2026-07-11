@@ -839,27 +839,13 @@ async def run_bridge(profile_id, agent_port, db_path):
             
             is_generating = False
             if isinstance(pre_count_check, dict) and pre_count_check.get("count", 0) > 0:
-                # Check if content changes over 6 seconds
+                # Check if content changes over 60 seconds (10 polls × 6s).
+                # z.ai Agent mode may be executing remote commands (SSH/bash)
+                # that don't update the DOM for 30+ seconds. Need longer wait.
                 text1 = pre_count_check.get("last_text", "")
-                await asyncio.sleep(3)
-                check2 = await zai_eval(session, agent_base, """(function(){
-                    var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
-                    var asst = [];
-                    for (var s = 0; s < sels.length; s++) { var f = document.querySelectorAll(sels[s]); for (var i = 0; i < f.length; i++) asst.push(f[i]); }
-                    var seen = {};
-                    asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
-                    asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
-                    if (asst.length === 0) return '';
-                    return (asst[asst.length-1].innerText||'').slice(0,500);
-                })()""")
-                text2 = check2 if isinstance(check2, str) else ""
-                if text1 != text2:
-                    is_generating = True
-                    log(profile_id, f"z.ai content changed! Still generating. (was {len(text1)} chars, now {len(text2)} chars)")
-                else:
-                    # Check one more time after 3 more seconds
-                    await asyncio.sleep(3)
-                    check3 = await zai_eval(session, agent_base, """(function(){
+                for gen_check in range(10):
+                    await asyncio.sleep(6)
+                    check_n = await zai_eval(session, agent_base, """(function(){
                         var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
                         var asst = [];
                         for (var s = 0; s < sels.length; s++) { var f = document.querySelectorAll(sels[s]); for (var i = 0; i < f.length; i++) asst.push(f[i]); }
@@ -869,10 +855,14 @@ async def run_bridge(profile_id, agent_port, db_path):
                         if (asst.length === 0) return '';
                         return (asst[asst.length-1].innerText||'').slice(0,500);
                     })()""")
-                    text3 = check3 if isinstance(check3, str) else ""
-                    if text2 != text3:
+                    text_n = check_n if isinstance(check_n, str) else ""
+                    if text1 != text_n:
                         is_generating = True
-                        log(profile_id, f"z.ai content changed on 2nd check! Still generating. (was {len(text2)} chars, now {len(text3)} chars)")
+                        log(profile_id, f"z.ai content changed after {(gen_check+1)*6}s! Still generating. (was {len(text1)} chars, now {len(text_n)} chars)")
+                        break
+                    text1 = text_n
+                if not is_generating:
+                    log(profile_id, "z.ai content unchanged for 60s, treating as idle")
             
             if is_generating:
                 log(profile_id, "z.ai is still generating! Starting auto-stream...")
