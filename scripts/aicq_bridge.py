@@ -93,7 +93,7 @@ async def zai_dom_text(session, agent_base, selector, timeout=15):
         return ""
 
 
-async def zai_eval(session, agent_base, script, timeout=300):
+async def zai_eval(session, agent_base, script, timeout=10):
     """Run a JS eval on the tab worker's z.ai page via CDP Runtime.evaluate.
     Uses /agent/cdp-eval (not /agent/eval) because tab workers don't have
     the samweb UI bootstrap JS injected, so the dispatch-based eval times out.
@@ -1114,7 +1114,7 @@ async def run_bridge(profile_id, agent_port, db_path):
             # fall back to eval/DOM when SSE has no data.
             last_sent_text = ""
             stable_count = 0
-            max_polls = 120  # 120 polls × 5s = 10 min (long tasks may run 1h+)
+            max_polls = 720  # 720 polls × 5s = 1 hour (long tasks may run 1h+)
 
             if core and from_id:
                 try:
@@ -1145,7 +1145,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                                     last_sent_text = combined
                                     stable_count = 0
                                     log(profile_id, f"SSE streaming... ({len(combined)} chars, {len(meaningful)} msgs)")
-                                    await asyncio.sleep(5)
+                                    await asyncio.sleep(10)
                                     continue
                 except Exception:
                     pass
@@ -1235,21 +1235,18 @@ async def run_bridge(profile_id, agent_port, db_path):
                     return JSON.stringify({{stage:'loading'}});
                 }})()""")
                 except Exception as e:
-                    # z.ai JS is blocked — use CDP DOM domain (bypasses JS)
-                    log(profile_id, f"eval timeout, falling back to DOM domain")
-                    # Read the last chat-assistant element via DOM API
-                    html = await zai_dom_text(session, agent_base,
-                        ".chat-assistant:last-of-type")
-                    if html and len(html) > 20:
-                        # Extract text from HTML for limit detection
-                        import re as _re
-                        text_only = _re.sub(r'<[^>]+>', '', html).strip()
-                        if text_only and len(text_only) > 10:
-                            result = {"stage": "responding", "response": html}
-                        else:
-                            result = {}
-                    else:
-                        result = {}
+                    # z.ai JS is blocked during task execution.
+                    # eval timeout is 10s — don't block the polling loop.
+                    # Try DOM domain fallback (also may timeout, but 15s).
+                    # If both fail, just continue to next poll.
+                    log(profile_id, f"eval timeout (z.ai busy), poll {poll+1}/{max_polls}")
+                    result = {}
+                    # Update AICQ status bar so user knows we're alive
+                    if core and from_id and poll % 6 == 0:
+                        try:
+                            await core.send_stream_chunk(from_id, "thinking",
+                                f"z.ai 执行中... (已等待 {(poll+1)*10}s)")
+                        except: pass
 
                 if isinstance(result, str):
                     try:
@@ -1526,10 +1523,41 @@ async def run_bridge(profile_id, agent_port, db_path):
                         except Exception:
                             pass
 
-                await asyncio.sleep(3)
+                await asyncio.sleep(10)
             else:
-                # Max polls reached
-                log(profile_id, f"max polls reached, sending final response ({len(last_sent_text)} chars)")
+                # Max polls reached (1 hour) — try one final eval, then send whatever we have
+                log(profile_id, f"max polls reached after 1h, doing final eval...")
+                try:
+                    final_result = await zai_eval(session, agent_base, f"""(function(){{
+                        var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                        var asst = [];
+                        for (var s = 0; s < sels.length; s++) {{ var f = document.querySelectorAll(sels[s]); for (var i = 0; i < f.length; i++) asst.push(f[i]); }}
+                        var seen = {{}};
+                        asst = asst.filter(function(el){{var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;}});
+                        asst = asst.filter(function(el){{var c=(el.className||'').toString();return c.indexOf('chat-user')<0;}});
+                        var preCount = {pre_count};
+                        var newMsgs = asst.slice(preCount);
+                        if (newMsgs.length === 0) return JSON.stringify({{stage:'waiting'}});
+                        var last = newMsgs[newMsgs.length-1];
+                        var lastClass = (last.className||'').toString();
+                        var ce = null;
+                        if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {{
+                            ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+                        }}
+                        var r = ce ? (ce.innerHTML||'').trim() : (last.innerHTML||'').trim();
+                        var rText = ce ? (ce.innerText||'').trim() : (last.innerText||'').trim();
+                        if (r && rText.length > 10) return JSON.stringify({{stage:'responding', response: r}});
+                        return JSON.stringify({{stage:'loading'}});
+                    }})()""", timeout=30)
+                    if isinstance(final_result, str):
+                        try: final_result = json.loads(final_result)
+                        except: pass
+                    if isinstance(final_result, dict) and final_result.get("stage") == "responding":
+                        last_sent_text = final_result.get("response", "")
+                        log(profile_id, f"final eval got response ({len(last_sent_text)} chars)")
+                except Exception as e:
+                    log(profile_id, f"final eval failed: {e}")
+                log(profile_id, f"sending final response ({len(last_sent_text)} chars)")
                 if core and from_id:
                     try:
                         if last_sent_text:
