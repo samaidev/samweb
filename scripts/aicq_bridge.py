@@ -137,7 +137,13 @@ def clean_zai_html(html):
     import re as _re
 
     # Remove Svelte template markers
-    cleaned = _re.sub(r'<!--.*?-->', '', html)
+    cleaned = _re.sub(r'<!--.*?-->', '', html, flags=_re.DOTALL)
+
+    # Remove SVG elements entirely (they're icons, not content)
+    cleaned = _re.sub(r'<svg[^>]*>.*?</svg>', '', cleaned, flags=_re.DOTALL)
+
+    # Remove button elements entirely (UI controls like stop button)
+    cleaned = _re.sub(r'<button[^>]*>.*?</button>', '', cleaned, flags=_re.DOTALL)
 
     # Remove empty divs/spans (no text content)
     cleaned = _re.sub(r'<div[^>]*>\s*</div>', '', cleaned)
@@ -158,14 +164,15 @@ def clean_zai_html(html):
     # Remove dir="auto" attributes (not needed)
     cleaned = _re.sub(r'\s+dir="auto"', '', cleaned)
 
+    # Remove id attributes (not needed for rendering)
+    cleaned = _re.sub(r'\s+id="[^"]*"', '', cleaned)
+
     # Collapse multiple newlines
     cleaned = _re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned)
 
     # Trim
     cleaned = cleaned.strip()
 
-    # If the cleaned HTML is just text (no tags), return as-is
-    # If it has tags, keep them for markdown rendering
     return cleaned
 
 
@@ -185,13 +192,16 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
       - {stage:'error', error: '...'} — error message detected
     """
     # Try multiple selectors for the assistant message container.
-    # Use zai_dom_text_last to get the LAST (newest) match.
+    # IMPORTANT: Read the INNER markdown-prose element (the actual response
+    # text), NOT the outer chat-assistant container (which includes z.ai's
+    # UI controls like the stop button with SVG icons).
+    # Order matters: try the most specific (innermost) selectors first.
     selectors = [
-        '[class*="chat-assistant"]',
-        '[class*="assistant-message"]',
-        '[class*="agent-message"]',
         '[class*="markdown-prose"]',
         '[class*="prose"]',
+        '[class*="assistant-message"]',
+        '[class*="agent-message"]',
+        '[class*="chat-assistant"]',
     ]
     for sel in selectors:
         html = await zai_dom_text_last(session, agent_base, sel, timeout=timeout)
@@ -1456,24 +1466,36 @@ async def run_bridge(profile_id, agent_port, db_path):
                 chat_url = f"https://chat.z.ai/c/{first_chat_id}"
 
                 for refresh_cycle in range(720):  # 720 × 10s = 2h max
-                    # Read last assistant message via /agent/cdp-eval
-                    # Don't refresh page (that breaks CDP WebSocket connection).
-                    # Just keep polling — z.ai JS has brief gaps between
-                    # task execution steps where eval succeeds.
+                    # Read last assistant message via CDP DOM domain
+                    # (bypasses JS thread — works even when z.ai is busy).
                     log(profile_id, f"auto-stream poll {refresh_cycle+1}/720...")
                     result = ""
                     try:
-                        result = await zai_eval(session, agent_base,
-                            "document.querySelector('.chat-assistant:last-of-type')?.innerHTML || ''",
-                            timeout=5)
+                        dom_result = await zai_read_response_via_dom(
+                            session, agent_base, timeout=10)
+                        if isinstance(dom_result, dict):
+                            result = dom_result.get("response", "")
                     except:
                         pass
 
                     if isinstance(result, str) and len(result) > 20:
                         if result != last_sent_text:
-                            # New content! Send to AICQ
+                            # New content! Send INCREMENTAL diff to AICQ
+                            # (aicq.me APPENDS text chunks, so only send the new part)
                             if core:
-                                try: await core.send_stream_chunk("1000008", "text", result)
+                                try:
+                                    if last_sent_text and result.startswith(last_sent_text):
+                                        # True incremental: send only new part
+                                        new_part = result[len(last_sent_text):]
+                                        if new_part:
+                                            await core.send_stream_chunk("1000008", "text", new_part)
+                                    elif last_sent_text:
+                                        # Content changed non-appendedly: clear + full
+                                        await core.send_stream_chunk("1000008", "clear_text", "")
+                                        await core.send_stream_chunk("1000008", "text", result)
+                                    else:
+                                        # First send
+                                        await core.send_stream_chunk("1000008", "text", result)
                                 except: pass
                             last_sent_text = result
                             stable_count = 0
@@ -1485,7 +1507,10 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 # 4 cycles (2 min) with no change → done
                                 log(profile_id, f"auto-stream complete ({len(result)} chars)")
                                 if core:
-                                    try: await core.send_stream_end("1000008")
+                                    try:
+                                        await core.send_stream_end("1000008",
+                                            text_segments=[result] if result else None,
+                                            content_order=["text"] if result else None)
                                     except: pass
                                 break
                             if core:
