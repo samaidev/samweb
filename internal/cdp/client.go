@@ -687,10 +687,39 @@ func parseCookies(cookieHeader string) []NetworkCookie {
 // Network.responseReceived, Network.loadingFinished) to capture
 // full network traffic including headers, cookies, and response bodies.
 func (c *Client) handleEvent(method string, params json.RawMessage) {
+        // Check the appropriate capture flag based on the event type.
+        // Network.* events need `capturing` (set by EnableNetwork).
+        // Fetch.requestPaused needs `fetchEnabled` (set by EnableFetchCapture).
+        // Network.eventSourceMessageReceived / Network.webSocketFrameReceived
+        // need `sseEnabled` (set by EnableSSECapture).
         c.captureMu.RLock()
         capturing := c.capturing
         c.captureMu.RUnlock()
-        if !capturing {
+        c.sseMu.Lock()
+        sseEnabled := c.sseEnabled
+        c.sseMu.Unlock()
+        c.fetchMu.Lock()
+        fetchEnabled := c.fetchEnabled
+        c.fetchMu.Unlock()
+
+        // Early return ONLY if no capture is enabled at all.
+        if !capturing && !sseEnabled && !fetchEnabled {
+                return
+        }
+
+        // For Fetch events, check fetchEnabled (not `capturing`).
+        // For SSE events, check sseEnabled.
+        // For other Network events, check `capturing`.
+        isFetchEvent := strings.HasPrefix(method, "Fetch.")
+        isSSEEvent := method == "Network.eventSourceMessageReceived" ||
+                method == "Network.webSocketFrameReceived"
+        if isFetchEvent && !fetchEnabled {
+                return
+        }
+        if isSSEEvent && !sseEnabled {
+                return
+        }
+        if !isFetchEvent && !isSSEEvent && !capturing {
                 return
         }
 
@@ -873,20 +902,16 @@ func (c *Client) handleEvent(method string, params json.RawMessage) {
 }
 
 // handleFetchPaused processes a Fetch.requestPaused event. We:
-//  1. Record the paused request (URL + request ID) so the bridge can
-//     poll it for incremental body chunks.
-//  2. DO NOT call Fetch.continueResponse yet — we keep the request
-//     paused so we can poll Fetch.getResponseBody for streaming chunks.
+//  1. Check the response Content-Type header.
+//  2. If it's a streaming response (text/event-stream, application/x-ndjson,
+//     application/stream+json, etc.), keep it paused and record it for
+//     incremental body chunk polling.
+//  3. If it's a non-streaming response (regular JSON, HTML, etc.),
+//     snapshot the body immediately and call continueResponse so the
+//     page isn't blocked.
 //
-// This works because: when z.ai's JS thread is blocked during a long
-// Agent task, z.ai can't process the response anyway. Keeping the
-// response paused doesn't make the user-visible behavior any worse.
-// Meanwhile, we can read incremental chunks via Fetch.getResponseBody
-// (which works on paused requests and returns whatever the server has
-// streamed so far).
-//
-// The bridge calls FinishFetchRequest (→ Fetch.continueResponse) when
-// it detects the stream is done, OR after a max timeout.
+// This ensures we capture streaming responses (z.ai Agent mode output)
+// without blocking the page on non-streaming requests.
 func (c *Client) handleFetchPaused(params json.RawMessage) {
         c.fetchMu.Lock()
         if !c.fetchEnabled {
@@ -913,33 +938,58 @@ func (c *Client) handleFetchPaused(params json.RawMessage) {
                 return
         }
 
-        // Filter: only intercept requests matching our URL substring filter.
-        // (e.g. "chat.z.ai/api/" — skip images, scripts, fonts, etc.)
-        c.fetchMu.Lock()
-        filter := c.fetchFilter
-        c.fetchMu.Unlock()
-        if filter != "" && !strings.Contains(ev.Request.URL, filter) {
-                // Not interesting — let it pass without interception.
-                go c.continueFetchRequest(ev.RequestID)
-                return
+        // Check Content-Type to decide if this is a streaming response
+        contentType := ""
+        for _, h := range ev.ResponseHeaders {
+                if strings.EqualFold(h.Name, "content-type") {
+                        contentType = strings.ToLower(h.Value)
+                        break
+                }
+        }
+        isStreaming := strings.Contains(contentType, "event-stream") ||
+                strings.Contains(contentType, "ndjson") ||
+                strings.Contains(contentType, "stream+json") ||
+                strings.Contains(contentType, "stream/json") ||
+                strings.Contains(contentType, "octet-stream")
+
+        // Also treat POST requests to chat/message/agent APIs as streaming
+        // (z.ai streams Agent mode responses via POST)
+        urlLower := strings.ToLower(ev.Request.URL)
+        isChatAPI := strings.Contains(urlLower, "/api/") &&
+                (strings.Contains(urlLower, "chat") ||
+                        strings.Contains(urlLower, "message") ||
+                        strings.Contains(urlLower, "agent") ||
+                        strings.Contains(urlLower, "completion") ||
+                        strings.Contains(urlLower, "stream"))
+        if isChatAPI && ev.Request.Method == "POST" {
+                isStreaming = true
         }
 
-        // Record the paused request. The bridge will poll it for
-        // incremental body chunks via PollFetchBodies → snapshotFetchBody.
-        c.fetchMu.Lock()
-        if c.fetchPaused == nil {
-                c.fetchPaused = map[string]int64{}
+        if isStreaming {
+                // Keep paused — record for incremental body chunk polling.
+                c.fetchMu.Lock()
+                if c.fetchPaused == nil {
+                        c.fetchPaused = map[string]int64{}
+                }
+                c.fetchPaused[ev.RequestID] = 0
+                if c.fetchURLs == nil {
+                        c.fetchURLs = map[string]string{}
+                }
+                c.fetchURLs[ev.RequestID] = ev.Request.URL
+                c.fetchMu.Unlock()
+                log.Printf("[cdp] Fetch.requestPaused (STREAMING, kept paused): %s %s [content-type=%s]",
+                        ev.Request.Method, ev.Request.URL, contentType)
+        } else {
+                // Non-streaming — snapshot body and continue immediately.
+                log.Printf("[cdp] Fetch.requestPaused (non-streaming, continuing): %s %s [content-type=%s]",
+                        ev.Request.Method, ev.Request.URL, contentType)
+                // Snapshot the body in a goroutine, then continue.
+                // We do this in a goroutine so the readLoop isn't blocked.
+                go func() {
+                        c.snapshotFetchBody(ev.RequestID, ev.Request.URL, ev.Timestamp)
+                        c.continueFetchRequest(ev.RequestID)
+                }()
         }
-        c.fetchPaused[ev.RequestID] = 0
-        // Also remember the URL so we can include it in chunks.
-        if c.fetchURLs == nil {
-                c.fetchURLs = map[string]string{}
-        }
-        c.fetchURLs[ev.RequestID] = ev.Request.URL
-        c.fetchMu.Unlock()
-
-        log.Printf("[cdp] Fetch.requestPaused: %s %s (paused, waiting for body chunks)",
-                ev.Request.Method, ev.Request.URL)
 }
 
 // snapshotFetchBody calls Fetch.getResponseBody on a paused request and
@@ -1315,7 +1365,25 @@ func (c *Client) GetDOMText(selector string) (string, error) {
 }
 
 // send sends a CDP command and waits for the response.
+// On timeout, attempts to reconnect once and retries.
 func (c *Client) send(method string, params interface{}) (json.RawMessage, error) {
+        result, err := c.sendNoRetry(method, params)
+        if err == nil {
+                return result, nil
+        }
+        // On timeout, try reconnecting once
+        if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "write") {
+                log.Printf("[cdp] %s failed (%v), attempting reconnect", method, err)
+                if rerr := c.Reconnect(); rerr != nil {
+                        return nil, fmt.Errorf("%w (reconnect failed: %v)", err, rerr)
+                }
+                return c.sendNoRetry(method, params)
+        }
+        return result, err
+}
+
+// sendNoRetry sends a CDP command and waits for the response (no retry).
+func (c *Client) sendNoRetry(method string, params interface{}) (json.RawMessage, error) {
         id := c.nextID.Add(1)
         ch := make(chan cdpResponse, 1)
         c.mu.Lock()
@@ -1333,22 +1401,63 @@ func (c *Client) send(method string, params interface{}) (json.RawMessage, error
                 Method: method,
                 Params: params,
         }
+        // Set a write deadline so a half-open WebSocket fails fast
+        _ = c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
         if err := c.conn.WriteJSON(payload); err != nil {
                 delete(c.pending, id)
                 c.mu.Unlock()
                 return nil, fmt.Errorf("cdp: write: %w", err)
         }
+        _ = c.conn.SetWriteDeadline(time.Time{}) // reset
         c.mu.Unlock()
 
         select {
         case r := <-ch:
                 return r.result, r.err
-        case <-time.After(5 * time.Second):
+        case <-time.After(10 * time.Second):
                 c.mu.Lock()
                 delete(c.pending, id)
                 c.mu.Unlock()
+                log.Printf("[cdp] timeout waiting for %s response (10s)", method)
                 return nil, fmt.Errorf("cdp: timeout waiting for %s response", method)
         }
+}
+
+// IsConnected returns true if the CDP WebSocket appears to be open.
+// This is a heuristic — the underlying connection may be half-open
+// (broken but not yet detected by the OS).
+func (c *Client) IsConnected() bool {
+        c.mu.Lock()
+        defer c.mu.Unlock()
+        return c.conn != nil
+}
+
+// Reconnect attempts to reconnect to the same CDP endpoint. Useful when
+// the underlying WebSocket has become stale (e.g. the tab worker process
+// was killed and respawned, breaking the old connection).
+func (c *Client) Reconnect() error {
+        c.mu.Lock()
+        if c.conn != nil {
+                c.conn.Close()
+                c.conn = nil
+        }
+        // Fail all pending requests
+        for id, ch := range c.pending {
+                ch <- cdpResponse{err: fmt.Errorf("reconnecting")}
+                delete(c.pending, id)
+        }
+        c.mu.Unlock()
+        // Reconnect
+        conn, _, err := websocket.DefaultDialer.Dial(c.endpoint, nil)
+        if err != nil {
+                return fmt.Errorf("cdp: reconnect to %s: %w", c.endpoint, err)
+        }
+        c.mu.Lock()
+        c.conn = conn
+        c.mu.Unlock()
+        go c.readLoop()
+        log.Printf("[cdp] reconnected to %s", c.endpoint)
+        return nil
 }
 
 // sendAsync sends a CDP command without waiting for the response. Used
