@@ -2030,18 +2030,21 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 await core.send_stream_end(from_id)
                             break
 
-                    # Normal response — send new/updated text as a stream chunk
+                    # Normal response — DON'T send intermediate updates.
+                    # aicq.me APPENDS text chunks (doesn't replace), so
+                    # sending the full content on every poll causes severe
+                    # duplication (content appears N times).
+                    #
+                    # Instead: wait until the content is stable (3 polls),
+                    # then send the FINAL content once + stream_end.
+                    # This eliminates all duplication.
                     if current_text != last_sent_text:
-                        # Send the full current text (aicq.me replaces the
-                        # streaming text, not appends)
-                        if core and from_id:
-                            try:
-                                await core.send_stream_chunk(from_id, "text", current_text)
-                            except Exception:
-                                pass
+                        # Content changed — just update our tracking.
+                        # DON'T send a stream_chunk yet (would cause duplication).
                         last_sent_text = current_text
                         stable_count = 0
-                        log(profile_id, f"streaming... ({len(current_text)} chars)")
+                        log(profile_id, f"content updated ({len(current_text)} chars, waiting for stability)")
+                    else:
                     else:
                         # Text unchanged — z.ai may be done, or between steps.
                         # SIMPLE strategy: wait 3 polls (30s total), then
