@@ -121,6 +121,54 @@ async def zai_dom_text_last(session, agent_base, selector, timeout=15):
         return ""
 
 
+def clean_zai_html(html):
+    """Clean z.ai's Svelte-generated HTML into proper markdown/HTML
+    that aicq.me can render correctly.
+
+    z.ai's DOM contains Svelte template markers (<!---->), empty divs,
+    and Svelte-specific class names. This function:
+    1. Removes Svelte template markers (<!---->)
+    2. Removes empty divs and spans
+    3. Preserves semantic HTML (p, strong, em, code, pre, ul, ol, li, h1-h6, hr, br)
+    4. Converts <br> to newlines
+    5. Removes Svelte class names (svelte-*)
+    6. Returns clean HTML or plain text
+    """
+    import re as _re
+
+    # Remove Svelte template markers
+    cleaned = _re.sub(r'<!--.*?-->', '', html)
+
+    # Remove empty divs/spans (no text content)
+    cleaned = _re.sub(r'<div[^>]*>\s*</div>', '', cleaned)
+    cleaned = _re.sub(r'<span[^>]*>\s*</span>', '', cleaned)
+
+    # Remove divs but keep their content (divs are just layout wrappers)
+    # Replace <div> with <br> to preserve line breaks, then remove the div tags
+    cleaned = _re.sub(r'<div[^>]*>', '\n', cleaned)
+    cleaned = _re.sub(r'</div>', '\n', cleaned)
+
+    # Remove Svelte class names from remaining tags
+    cleaned = _re.sub(r'\s+class="[^"]*svelte-[^"]*"', '', cleaned)
+    cleaned = _re.sub(r'\s+class="svelte-[^"]*"', '', cleaned)
+
+    # Remove aria-hidden attributes
+    cleaned = _re.sub(r'\s+aria-hidden="[^"]*"', '', cleaned)
+
+    # Remove dir="auto" attributes (not needed)
+    cleaned = _re.sub(r'\s+dir="auto"', '', cleaned)
+
+    # Collapse multiple newlines
+    cleaned = _re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned)
+
+    # Trim
+    cleaned = cleaned.strip()
+
+    # If the cleaned HTML is just text (no tags), return as-is
+    # If it has tags, keep them for markdown rendering
+    return cleaned
+
+
 async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15):
     """Read z.ai's latest assistant response via CDP DOM domain.
 
@@ -132,7 +180,7 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
     newest assistant message), not the first one.
 
     Returns a dict {stage, response} similar to the eval-based check:
-      - {stage:'responding', response: '<html>...'} — response found
+      - {stage:'responding', response: '<clean html or text>'} — response found
       - {stage:'waiting'} — no new assistant messages (or empty/loading)
       - {stage:'error', error: '...'} — error message detected
     """
@@ -171,8 +219,15 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
                                                 '超出个人限制', 'Sandbox limit']):
             return {"stage": "error", "error": text_content[:200]}
 
-        # Return the HTML as the response
-        return {"stage": "responding", "response": html}
+        # Clean the HTML to remove Svelte markers and produce proper
+        # markdown/HTML that aicq.me can render correctly.
+        cleaned_html = clean_zai_html(html)
+
+        # If cleaned HTML is just plain text (no tags), return as text
+        if '<' not in cleaned_html:
+            return {"stage": "responding", "response": cleaned_html}
+        # Otherwise return the cleaned HTML
+        return {"stage": "responding", "response": cleaned_html}
     return {"stage": "waiting"}
 
 
