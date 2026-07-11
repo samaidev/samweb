@@ -938,7 +938,10 @@ func (c *Client) handleFetchPaused(params json.RawMessage) {
                 return
         }
 
-        // Check Content-Type to decide if this is a streaming response
+        // Check Content-Type to decide if this is a streaming response.
+        // ONLY use content-type — don't use URL heuristics because they
+        // cause false positives (e.g. chats/new is a regular JSON POST
+        // but matches "chat" in the URL).
         contentType := ""
         for _, h := range ev.ResponseHeaders {
                 if strings.EqualFold(h.Name, "content-type") {
@@ -951,19 +954,6 @@ func (c *Client) handleFetchPaused(params json.RawMessage) {
                 strings.Contains(contentType, "stream+json") ||
                 strings.Contains(contentType, "stream/json") ||
                 strings.Contains(contentType, "octet-stream")
-
-        // Also treat POST requests to chat/message/agent APIs as streaming
-        // (z.ai streams Agent mode responses via POST)
-        urlLower := strings.ToLower(ev.Request.URL)
-        isChatAPI := strings.Contains(urlLower, "/api/") &&
-                (strings.Contains(urlLower, "chat") ||
-                        strings.Contains(urlLower, "message") ||
-                        strings.Contains(urlLower, "agent") ||
-                        strings.Contains(urlLower, "completion") ||
-                        strings.Contains(urlLower, "stream"))
-        if isChatAPI && ev.Request.Method == "POST" {
-                isStreaming = true
-        }
 
         if isStreaming {
                 // Keep paused — record for incremental body chunk polling.
