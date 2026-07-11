@@ -902,15 +902,17 @@ async def run_bridge(profile_id, agent_port, db_path):
 
                 last_sent_text = ""
                 stable_count = 0
-                for poll in range(720):  # 720 × 10s = 2h
+                for poll in range(1440):  # 1440 × 5s = 2h
                     # Use a VERY simple eval — just get last chat-assistant innerHTML.
-                    # Complex selectors timeout when JS is partially blocked.
+                    # z.ai JS is intermittently blocked during task execution.
+                    # Use 3s timeout + 5s interval = try every 8s, catch JS gaps.
                     try:
                         result = await zai_eval(session, agent_base,
                             "document.querySelector('.chat-assistant:last-of-type')?.innerHTML || ''",
-                            timeout=10)
+                            timeout=3)
                     except Exception:
-                        log(profile_id, f"auto-stream eval timeout poll {poll+1}/720")
+                        if poll % 12 == 0:  # log every ~1 min
+                            log(profile_id, f"auto-stream eval timeout poll {poll+1}/1440")
                         result = ""
                     if isinstance(result, str) and len(result) > 20:
                         if result != last_sent_text:
@@ -936,7 +938,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                         try: await core.send_stream_chunk("1000008", "thinking",
                             f"z.ai 执行中... (已等待 {(poll+1)*10}s)")
                         except: pass
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(5)
                 # auto-stream loop done
                 if not last_sent_text:
                     log(profile_id, "auto-stream: no output captured")
