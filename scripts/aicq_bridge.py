@@ -1030,8 +1030,11 @@ async def run_bridge(profile_id, agent_port, db_path):
                             if (!/thinking|reasoning|action|toolCallTrace/i.test(c) && d.innerText.trim().length > 50) {{ ce = d; break; }}
                         }}
                     }}
-                    var r = ce ? (ce.innerText||'').trim() : ft;
-                    if (r && r.length > 10) return JSON.stringify({{stage:'responding', response: r}});
+                    // Use innerHTML to preserve formatting (markdown/HTML).
+                    // aicq.me renders messages with marked.js which supports HTML.
+                    var r = ce ? (ce.innerHTML||'').trim() : (last.innerHTML||'').trim();
+                    var rText = ce ? (ce.innerText||'').trim() : ft;
+                    if (r && rText.length > 10) return JSON.stringify({{stage:'responding', response: r}});
                     return JSON.stringify({{stage:'loading'}});
                 }})()""")
 
@@ -1185,8 +1188,11 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 if (!ce) { var ds = last.querySelectorAll('div');
                                     for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
                                     if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
-                                var r = ce ? (ce.innerText||'').trim() : ft;
-                                if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
+                                // Use innerHTML to preserve formatting (markdown/HTML).
+                    // aicq.me renders messages with marked.js which supports HTML.
+                    var r = ce ? (ce.innerHTML||'').trim() : (last.innerHTML||'').trim();
+                    var rText = ce ? (ce.innerText||'').trim() : ft;
+                                if (r && rText.length > 10) return JSON.stringify({stage:'responding', response: r});
                                 return JSON.stringify({stage:'loading'});
                             })()""")
                             if isinstance(recheck, str):
@@ -1256,8 +1262,11 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 if (!ce) { var ds = last.querySelectorAll('div');
                                     for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
                                     if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
-                                var r = ce ? (ce.innerText||'').trim() : ft;
-                                if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
+                                // Use innerHTML to preserve formatting (markdown/HTML).
+                    // aicq.me renders messages with marked.js which supports HTML.
+                    var r = ce ? (ce.innerHTML||'').trim() : (last.innerHTML||'').trim();
+                    var rText = ce ? (ce.innerText||'').trim() : ft;
+                                if (r && rText.length > 10) return JSON.stringify({stage:'responding', response: r});
                                 return JSON.stringify({stage:'loading'});
                             })()""")
                             if isinstance(recheck, str):
