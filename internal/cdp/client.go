@@ -1370,6 +1370,65 @@ func (c *Client) GetDOMText(selector string) (string, error) {
         return oh.OuterHTML, nil
 }
 
+// GetDOMTextLast reads the innerHTML of the LAST element matching a CSS
+// selector via CDP DOM domain. This is like GetDOMText but returns the
+// last match instead of the first — needed for z.ai chat pages where
+// multiple assistant messages exist and we want the newest one.
+//
+// Bypasses the JS thread entirely, so it works even when z.ai's JS is
+// blocked during task execution.
+func (c *Client) GetDOMTextLast(selector string) (string, error) {
+        // 1. Get the root document
+        resp, err := c.send("DOM.getDocument", map[string]interface{}{
+                "depth": 0,
+        })
+        if err != nil {
+                return "", fmt.Errorf("DOM.getDocument: %w", err)
+        }
+        var doc struct {
+                Root struct {
+                        NodeID int `json:"nodeId"`
+                } `json:"root"`
+        }
+        if err := json.Unmarshal(resp, &doc); err != nil {
+                return "", fmt.Errorf("decode document: %w", err)
+        }
+
+        // 2. Query selector ALL for all matching elements
+        resp, err = c.send("DOM.querySelectorAll", map[string]interface{}{
+                "nodeId":   doc.Root.NodeID,
+                "selector": selector,
+        })
+        if err != nil {
+                return "", fmt.Errorf("DOM.querySelectorAll: %w", err)
+        }
+        var qs struct {
+                NodeIDs []int `json:"nodeIds"`
+        }
+        if err := json.Unmarshal(resp, &qs); err != nil {
+                return "", fmt.Errorf("decode querySelectorAll: %w", err)
+        }
+        if len(qs.NodeIDs) == 0 {
+                return "", nil // no match
+        }
+
+        // 3. Get the LAST matching element's outer HTML
+        lastNodeID := qs.NodeIDs[len(qs.NodeIDs)-1]
+        resp, err = c.send("DOM.getOuterHTML", map[string]interface{}{
+                "nodeId": lastNodeID,
+        })
+        if err != nil {
+                return "", fmt.Errorf("DOM.getOuterHTML: %w", err)
+        }
+        var oh struct {
+                OuterHTML string `json:"outerHTML"`
+        }
+        if err := json.Unmarshal(resp, &oh); err != nil {
+                return "", fmt.Errorf("decode outerHTML: %w", err)
+        }
+        return oh.OuterHTML, nil
+}
+
 // send sends a CDP command and waits for the response.
 // On timeout, attempts to reconnect once and retries.
 func (c *Client) send(method string, params interface{}) (json.RawMessage, error) {

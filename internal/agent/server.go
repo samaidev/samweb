@@ -114,6 +114,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/eval", s.handleEval)
         mux.HandleFunc("/agent/cdp-eval", s.handleCDPEval)
         mux.HandleFunc("/agent/cdp-dom-text", s.handleCDPDOMText)
+        mux.HandleFunc("/agent/cdp-dom-text-last", s.handleCDPDOMTextLast)
         mux.HandleFunc("/agent/sse-enable", s.handleSSEEnable)
         mux.HandleFunc("/agent/sse-messages", s.handleSSEMessages)
         // Fetch domain capture (works when z.ai JS thread is blocked)
@@ -741,6 +742,33 @@ func (s *Server) handleCDPDOMText(w http.ResponseWriter, r *http.Request) {
         ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
         defer cancel()
         html, err := s.backend.CDPDOMText(ctx, body.Selector)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, map[string]string{"html": html})
+}
+
+// handleCDPDOMTextLast reads the LAST matching element's HTML via CDP DOM
+// domain. POST /agent/cdp-dom-text-last {"selector":"[class*='chat-assistant']"}
+// → {"html":"<div class='chat-assistant'>...</div>"}
+// Used for z.ai chat pages with multiple assistant messages — returns the
+// newest one (last match), not the first.
+func (s *Server) handleCDPDOMTextLast(w http.ResponseWriter, r *http.Request) {
+        var body struct {
+                Selector string `json:"selector"`
+        }
+        if err := readJSON(r, &body); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if body.Selector == "" {
+                writeError(w, http.StatusBadRequest, "selector is required")
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        html, err := s.backend.CDPDOMTextLast(ctx, body.Selector)
         if err != nil {
                 writeError(w, http.StatusInternalServerError, err.Error())
                 return

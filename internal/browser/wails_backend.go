@@ -656,6 +656,20 @@ func (b *WailsBackend) CDPDOMText(ctx context.Context, selector string) (string,
         return c.GetDOMText(selector)
 }
 
+// CDPDOMTextLast reads the LAST matching element's HTML via CDP DOM domain
+// (DOM.getDocument → DOM.querySelectorAll → DOM.getOuterHTML on last match).
+// This bypasses the JS thread entirely. Used for z.ai chat pages where
+// multiple assistant messages exist — we want the newest one.
+func (b *WailsBackend) CDPDOMTextLast(ctx context.Context, selector string) (string, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return "", fmt.Errorf("CDP client not connected")
+        }
+        return c.GetDOMTextLast(selector)
+}
+
 func (b *WailsBackend) EnableSSECapture(ctx context.Context) error {
         b.cdpMu.RLock()
         c := b.cdpClient

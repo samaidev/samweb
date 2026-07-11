@@ -101,6 +101,26 @@ async def zai_dom_text(session, agent_base, selector, timeout=15):
         return ""
 
 
+async def zai_dom_text_last(session, agent_base, selector, timeout=15):
+    """Read the LAST matching element's HTML via CDP DOM domain.
+    Uses /agent/cdp-dom-text-last (DOM.querySelectorAll → last match).
+    Needed for z.ai chat pages with multiple assistant messages —
+    we want the newest response, not the first one.
+    """
+    async def _do_dom():
+        resp = await session.post(f"{agent_base}/agent/cdp-dom-text-last",
+                                  json={"selector": selector},
+                                  timeout=aiohttp.ClientTimeout(total=timeout))
+        data = await resp.json()
+        return data.get("html", "")
+    try:
+        return await asyncio.wait_for(_do_dom(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return ""
+    except Exception:
+        return ""
+
+
 async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15):
     """Read z.ai's latest assistant response via CDP DOM domain.
 
@@ -108,12 +128,16 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
     The DOM domain reads element HTML directly via CDP WebSocket — it does
     NOT require the page's JS thread to be free.
 
+    Uses /agent/cdp-dom-text-last to get the LAST matching element (the
+    newest assistant message), not the first one.
+
     Returns a dict {stage, response} similar to the eval-based check:
       - {stage:'responding', response: '<html>...'} — response found
       - {stage:'waiting'} — no new assistant messages
       - {stage:'error', error: '...'} — error message detected
     """
-    # Try multiple selectors for the assistant message container
+    # Try multiple selectors for the assistant message container.
+    # Use zai_dom_text_last to get the LAST (newest) match.
     selectors = [
         '[class*="chat-assistant"]',
         '[class*="assistant-message"]',
@@ -122,7 +146,7 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
         '[class*="prose"]',
     ]
     for sel in selectors:
-        html = await zai_dom_text(session, agent_base, sel, timeout=timeout)
+        html = await zai_dom_text_last(session, agent_base, sel, timeout=timeout)
         if html and len(html) > 20:
             # Check for error messages
             if any(err in html for err in ['回复内容为空', '请稍后重试', '限制沙箱',
