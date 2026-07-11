@@ -353,6 +353,164 @@ async def zai_switch_to_agent_mode(session, agent_base, profile_id):
     return result
 
 
+async def zai_list_workspaces(session, agent_base, profile_id):
+    """List all active z.ai workspaces (sandboxes) for the current account.
+
+    z.ai Agent mode creates a workspace (sandbox) per chat. The account
+    has a limit (default 3). When the limit is reached, new Agent tasks
+    fail with "Sandbox limit reached (max 3)".
+
+    This function calls the z.ai API to list all active workspaces.
+    Returns a list of workspace dicts, each containing:
+      - function_name: e.g. "ws-7552e0d8-..."
+      - chat_id: e.g. "chat-92a04e8b-..."
+      - chat_title: e.g. "新聊天"
+      - is_active: True
+      - created_at: ISO timestamp
+    """
+    result = await zai_eval(session, agent_base, """(async function(){
+        try {
+            var token = localStorage.getItem('token') ?? '';
+            var resp = await fetch('https://chat.z.ai/api/v1/web-dev/workspaces/user-fc', {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + token
+                }
+            });
+            var data = await resp.json();
+            return JSON.stringify({ok: resp.ok, body: data});
+        } catch(e) {
+            return JSON.stringify({ok: false, error: e.message});
+        }
+    })()""", timeout=20)
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            return []
+    if not isinstance(result, dict) or not result.get("ok"):
+        log(profile_id, f"list workspaces failed: {result}")
+        return []
+    body = result.get("body", {})
+    workspaces = body.get("workspaces", [])
+    return workspaces if isinstance(workspaces, list) else []
+
+
+async def zai_delete_workspace(session, agent_base, profile_id, chat_id):
+    """Delete a single z.ai workspace (sandbox) by chat_id.
+
+    z.ai API: DELETE /api/v1/web-dev/workspaces/{chat_id_without_chat_prefix}
+    The chat_id from the workspace list looks like "chat-92a04e8b-...".
+    The API expects the ID WITHOUT the "chat-" prefix.
+    """
+    # Strip "chat-" prefix if present
+    ws_id = chat_id[5:] if chat_id.startswith("chat-") else chat_id
+    result = await zai_eval(session, agent_base, f"""(async function(){{
+        try {{
+            var token = localStorage.getItem('token') ?? '';
+            var wsId = "{ws_id}";
+            var url = 'https://chat.z.ai/api/v1/web-dev/workspaces/' + wsId;
+            var resp = await fetch(url, {{
+                method: 'DELETE',
+                headers: {{
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + token
+                }}
+            }});
+            var text = await resp.text();
+            return JSON.stringify({{ok: resp.ok, status: resp.status, body: text}});
+        }} catch(e) {{
+            return JSON.stringify({{ok: false, error: e.message}});
+        }}
+    }})()""", timeout=20)
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            pass
+    if isinstance(result, dict) and result.get("ok"):
+        log(profile_id, f"deleted workspace for chat {chat_id}: {result.get('body','')[:100]}")
+        return True
+    else:
+        log(profile_id, f"failed to delete workspace {chat_id}: {result}")
+        return False
+
+
+async def zai_release_workspaces(session, agent_base, profile_id, keep_chat_id=None, max_release=3):
+    """Release z.ai workspaces (sandboxes) to free up slots.
+
+    z.ai Agent mode has a workspace limit (default 3). When the limit
+    is reached, new Agent tasks fail with "Sandbox limit reached".
+    This function lists all active workspaces and deletes the oldest
+    ones (excluding the current chat's workspace) to free up slots.
+
+    Args:
+        keep_chat_id: chat_id of the current chat — its workspace is
+            preserved so the current conversation isn't interrupted.
+        max_release: max number of workspaces to delete in one call
+            (to avoid deleting everything if something goes wrong).
+
+    Returns the number of workspaces released.
+    """
+    log(profile_id, f"releasing workspaces (keep={keep_chat_id}, max={max_release})...")
+    workspaces = await zai_list_workspaces(session, agent_base, profile_id)
+    if not workspaces:
+        log(profile_id, "no workspaces to release")
+        return 0
+
+    log(profile_id, f"found {len(workspaces)} workspaces:")
+    for ws in workspaces:
+        log(profile_id, f"  - chat_id={ws.get('chat_id','')} title={ws.get('chat_title','')} created={ws.get('created_at','')}")
+
+    # Sort by created_at (oldest first) — delete oldest workspaces
+    def sort_key(ws):
+        created = ws.get("created_at", "")
+        return created
+    workspaces.sort(key=sort_key)
+
+    released = 0
+    for ws in workspaces:
+        if released >= max_release:
+            break
+        chat_id = ws.get("chat_id", "")
+        if not chat_id:
+            continue
+        if keep_chat_id and chat_id == keep_chat_id:
+            log(profile_id, f"skipping current chat workspace: {chat_id}")
+            continue
+        ok = await zai_delete_workspace(session, agent_base, profile_id, chat_id)
+        if ok:
+            released += 1
+            await asyncio.sleep(1)  # avoid rate limiting
+        else:
+            break
+
+    log(profile_id, f"released {released} workspaces")
+    return released
+
+
+def is_sandbox_limit_error(text):
+    """Check if the text indicates a z.ai sandbox/workspace limit error.
+
+    z.ai returns this error when the workspace limit (max 3) is reached:
+      "Sandbox limit reached (max 3). Please go to settings page and close other sessions."
+      "Workspace creation failed"
+      error_code: 429
+    """
+    if not text:
+        return False
+    text_lower = text.lower() if isinstance(text, str) else str(text).lower()
+    indicators = [
+        "sandbox limit",
+        "workspace creation failed",
+        "max 3",
+        "close other sessions",
+        "workspace_creation_failed",
+    ]
+    return any(ind in text_lower for ind in indicators)
+
+
 async def zai_delete_all_chats(session, agent_base, profile_id):
     """Delete all existing chats in the z.ai sidebar.
 
@@ -1236,9 +1394,16 @@ async def run_bridge(profile_id, agent_port, db_path):
             if not ready:
                 log(profile_id, "z.ai not ready after 30s, processing anyway")
 
+            # Strip any CLI artifacts (agent-browser appends " --timeout N")
+            # to get the actual command/message.
+            content_clean = content.strip()
+            # Remove trailing " --timeout N" if present
+            import re as _re
+            content_clean = _re.sub(r'\s+--timeout\s+\d+\s*$', '', content_clean).strip()
+
             # "/new" command: delete old chats + create a new z.ai chat,
             # then wait for the next message (don't send "/new" to z.ai).
-            if content.strip().lower() == "/new":
+            if content_clean.lower() == "/new":
                 log(profile_id, f"/new command — creating new z.ai chat")
                 # Delete all existing chats
                 await zai_delete_all_chats(session, agent_base, profile_id)
@@ -1249,6 +1414,28 @@ async def run_bridge(profile_id, agent_port, db_path):
                     await core.send_message(from_id, "✅ 已新建会话，请发送消息")
                 else:
                     await core.send_message(from_id, "⚠️ 新建会话失败，请重试")
+                continue
+
+            # "/release" command: release z.ai workspaces (sandboxes) to
+            # free up slots. Useful when the account hits the workspace
+            # limit (max 3) and new Agent tasks fail.
+            if content_clean.lower() == "/release":
+                log(profile_id, f"/release command — releasing workspaces")
+                await core.send_message(from_id, "🔄 正在释放 z.ai 容器...")
+                workspaces = await zai_list_workspaces(session, agent_base, profile_id)
+                ws_info = "\n".join(
+                    f"  • {w.get('chat_title','?')} ({w.get('chat_id','')[:20]}...)"
+                    for w in workspaces
+                )
+                await core.send_message(from_id, f"📋 当前容器 ({len(workspaces)}/3):\n{ws_info}")
+                released = await zai_release_workspaces(
+                    session, agent_base, profile_id,
+                    keep_chat_id=chat_map.get(from_id),
+                    max_release=3)
+                if released > 0:
+                    await core.send_message(from_id, f"✅ 已释放 {released} 个容器")
+                else:
+                    await core.send_message(from_id, "⚠️ 没有可释放的容器")
                 continue
 
             # Default: continue in the same z.ai chat for this friend
@@ -1264,7 +1451,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                     chat_map[from_id] = chat_id
 
             # Type + send (with high-traffic retry)
-            ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content, core, from_id)
+            ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content_clean, core, from_id)
             if not ok:
                 log(profile_id, f"failed to send to z.ai: {send_result}")
                 await core.send_message(from_id, f"发送失败: {send_result}")
@@ -1361,6 +1548,43 @@ async def run_bridge(profile_id, agent_port, db_path):
                                         f"(strategy={parse_debug.get('strategy','?')}, "
                                         f"raw_len={parse_debug.get('raw_len',0)}, "
                                         f"buffer={len(fetch_text_buffer)} chars)")
+
+                                    # Check if the stream contains a sandbox limit error
+                                    # (z.ai returns this as an SSE event: workspace_creation_failed)
+                                    if is_sandbox_limit_error(fetch_text_buffer):
+                                        log(profile_id, "sandbox limit detected in Fetch stream — releasing workspaces...")
+                                        if core and from_id:
+                                            try:
+                                                await core.send_stream_chunk(from_id, "thinking",
+                                                    "⚠️ 容器已达上限，正在自动释放旧会话...")
+                                            except: pass
+                                        # Release old workspaces
+                                        released = await zai_release_workspaces(
+                                            session, agent_base, profile_id,
+                                            keep_chat_id=chat_map.get(from_id),
+                                            max_release=3)
+                                        if released > 0:
+                                            log(profile_id, f"released {released} workspaces, retrying...")
+                                            if core and from_id:
+                                                try:
+                                                    await core.send_stream_chunk(from_id, "thinking",
+                                                        f"✅ 已释放 {released} 个旧会话，重试中...")
+                                                except: pass
+                                            # Re-send the original message
+                                            ok2, _ = await zai_type_and_send(
+                                                session, agent_base, profile_id, content, core, from_id)
+                                            if ok2:
+                                                last_sent_text = ""
+                                                fetch_text_buffer = ""
+                                                stable_count = 0
+                                                continue
+                                        else:
+                                            if core and from_id:
+                                                await core.send_stream_chunk(from_id, "text",
+                                                    "❌ 容器释放失败，请稍后重试或手动关闭旧会话")
+                                                await core.send_stream_end(from_id)
+                                            break
+
                                     # Send the accumulated text as a stream chunk
                                     if fetch_text_buffer != last_sent_text:
                                         if core and from_id:
@@ -1515,8 +1739,45 @@ async def run_bridge(profile_id, agent_port, db_path):
                 if stage == "error":
                     error_msg = result.get("error", "unknown")
                     log(profile_id, f"z.ai error: {error_msg}")
+
+                    # Check if this is a sandbox/workspace limit error FIRST
+                    # (before usage limit check — sandbox limit needs different handling)
+                    if is_sandbox_limit_error(error_msg) or is_sandbox_limit_error(last_sent_text) or is_sandbox_limit_error(fetch_text_buffer):
+                        log(profile_id, f"sandbox limit detected — releasing workspaces...")
+                        if core and from_id:
+                            try:
+                                await core.send_stream_chunk(from_id, "thinking",
+                                    "⚠️ 容器已达上限，正在自动释放旧会话...")
+                            except: pass
+                        # Release old workspaces (keep current chat's workspace)
+                        released = await zai_release_workspaces(
+                            session, agent_base, profile_id,
+                            keep_chat_id=chat_map.get(from_id),
+                            max_release=3)
+                        if released > 0:
+                            log(profile_id, f"released {released} workspaces, retrying...")
+                            if core and from_id:
+                                try:
+                                    await core.send_stream_chunk(from_id, "thinking",
+                                        f"✅ 已释放 {released} 个旧会话，重试中...")
+                                except: pass
+                            # Re-send the original message
+                            ok2, _ = await zai_type_and_send(
+                                session, agent_base, profile_id, content, core, from_id)
+                            if ok2:
+                                last_sent_text = ""
+                                fetch_text_buffer = ""
+                                stable_count = 0
+                                continue
+                        else:
+                            if core and from_id:
+                                await core.send_stream_chunk(from_id, "text",
+                                    "❌ 容器释放失败，请稍后重试或手动关闭旧会话")
+                                await core.send_stream_end(from_id)
+                            break
+
                     # Check if this is a usage limit error
-                    if is_usage_limit_error(error_msg) or is_usage_limit_error(last_sent_text):
+                    elif is_usage_limit_error(error_msg) or is_usage_limit_error(last_sent_text):
                         # Bypass: dismiss popup, delete chats, send greeting,
                         # wait for reply, delete chats, then re-send original
                         bypass_ok = await zai_bypass_usage_limit(
