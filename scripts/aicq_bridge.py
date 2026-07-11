@@ -79,7 +79,7 @@ def log(profile_id, msg):
 
 # ---------- z.ai DOM automation helpers ----------
 
-async def zai_eval(session, agent_base, script, timeout=60):
+async def zai_eval(session, agent_base, script, timeout=120):
     """Run a JS eval on the tab worker's z.ai page via CDP Runtime.evaluate.
     Uses /agent/cdp-eval (not /agent/eval) because tab workers don't have
     the samweb UI bootstrap JS injected, so the dispatch-based eval times out.
@@ -1132,7 +1132,10 @@ async def run_bridge(profile_id, agent_port, db_path):
                         pass
 
                 # Get current z.ai response text (only NEW messages after pre_count)
-                result = await zai_eval(session, agent_base, f"""(function(){{
+                # Use try/except — z.ai may block JS during task execution
+                # (e.g. running bash commands). Don't break the polling loop.
+                try:
+                    result = await zai_eval(session, agent_base, f"""(function(){{
                     var sels = [
                         '[class*="chat-assistant"]',
                         '[class*="assistant-message"]',
@@ -1181,6 +1184,9 @@ async def run_bridge(profile_id, agent_port, db_path):
                     if (r && rText.length > 10) return JSON.stringify({{stage:'responding', response: r}});
                     return JSON.stringify({{stage:'loading'}});
                 }})()""")
+                except Exception as e:
+                    log(profile_id, f"eval timeout/error (z.ai may be busy): {e}")
+                    result = {}
 
                 if isinstance(result, str):
                     try:
