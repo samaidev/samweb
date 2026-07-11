@@ -1320,30 +1320,58 @@ async def run_bridge(profile_id, agent_port, db_path):
                 # JS thread is fully blocked during a long Agent task.
                 # Fetch.requestPaused events arrive via CDP WebSocket,
                 # completely independent of the page's JS event loop.
+                #
+                # IMPORTANT: Only send STREAMING chunks (from text/event-stream
+                # endpoints) to AICQ. Non-streaming chunks (JSON API responses,
+                # GIFs, etc.) are captured for debugging but NOT sent — the
+                # actual response text comes from the eval-based polling below.
                 if fetch_ok:
                     try:
                         new_chunks = await fetch_poll_and_get_chunks(session, agent_base)
                         if new_chunks:
-                            # Parse the chunks to extract assistant text
-                            new_text, parse_debug = parse_fetch_chunks_for_text(new_chunks)
-                            if new_text:
-                                fetch_text_buffer += new_text
-                                log(profile_id,
-                                    f"Fetch chunk: +{len(new_text)} chars "
-                                    f"(strategy={parse_debug.get('strategy','?')}, "
-                                    f"raw_len={parse_debug.get('raw_len',0)}, "
-                                    f"buffer={len(fetch_text_buffer)} chars)")
-                                # Send the accumulated text as a stream chunk
-                                if fetch_text_buffer != last_sent_text:
-                                    if core and from_id:
-                                        try:
-                                            await core.send_stream_chunk(from_id, "text", fetch_text_buffer)
-                                        except: pass
-                                    last_sent_text = fetch_text_buffer
-                                    stable_count = 0
-                                    # Don't sleep too long — keep capturing chunks
-                                    await asyncio.sleep(3)
-                                    continue
+                            # Filter: only keep chunks from streaming endpoints
+                            # (text/event-stream). Non-streaming chunks (JSON,
+                            # GIF, HTML) are logged but not sent to AICQ.
+                            stream_chunks_filtered = []
+                            for c in new_chunks:
+                                url = c.get("url", "")
+                                chunk_text = c.get("chunk", "")
+                                # Streaming endpoints: workspaces/up (Agent mode SSE),
+                                # any event-stream URL, or chat completion stream
+                                is_stream = ("workspaces/up" in url or
+                                             "event-stream" in url or
+                                             "completion" in url or
+                                             "/chat/completions" in url or
+                                             "stream" in url.lower())
+                                if is_stream and chunk_text:
+                                    stream_chunks_filtered.append(c)
+                                else:
+                                    # Log non-streaming chunks for debugging
+                                    log(profile_id,
+                                        f"Fetch non-stream chunk (skipped): url={url[:60]} "
+                                        f"len={len(chunk_text)}")
+
+                            if stream_chunks_filtered:
+                                # Parse only the streaming chunks
+                                new_text, parse_debug = parse_fetch_chunks_for_text(stream_chunks_filtered)
+                                if new_text:
+                                    fetch_text_buffer += new_text
+                                    log(profile_id,
+                                        f"Fetch STREAM chunk: +{len(new_text)} chars "
+                                        f"(strategy={parse_debug.get('strategy','?')}, "
+                                        f"raw_len={parse_debug.get('raw_len',0)}, "
+                                        f"buffer={len(fetch_text_buffer)} chars)")
+                                    # Send the accumulated text as a stream chunk
+                                    if fetch_text_buffer != last_sent_text:
+                                        if core and from_id:
+                                            try:
+                                                await core.send_stream_chunk(from_id, "text", fetch_text_buffer)
+                                            except: pass
+                                        last_sent_text = fetch_text_buffer
+                                        stable_count = 0
+                                        # Don't sleep too long — keep capturing chunks
+                                        await asyncio.sleep(3)
+                                        continue
                     except Exception as e:
                         log(profile_id, f"Fetch poll error: {e}")
 
