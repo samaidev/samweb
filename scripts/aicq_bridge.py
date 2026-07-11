@@ -315,41 +315,79 @@ def _extract_text_from_zai_obj(obj):
 
 
 async def zai_switch_to_agent_mode(session, agent_base, profile_id):
-    """Switch z.ai from Chat mode to Agent mode."""
+    """Switch z.ai from Chat mode to Agent mode.
+
+    z.ai's mode selector uses BUTTON elements with a `data-active` attribute
+    that tracks the current mode. The "Agent 模式" text is inside a DIV child
+    of the BUTTON. Clicking the DIV doesn't trigger React's onClick handler
+    reliably — we must click the BUTTON parent.
+
+    After clicking, we verify the switch by checking data-active="true" on
+    the Agent 模式 button.
+    """
     log(profile_id, "switching to Agent mode...")
-    # z.ai has "Chat 模式" and "Agent 模式" as clickable DIVs in the sidebar.
-    # We click "Agent 模式" to switch. The element has class containing "flex-1"
-    # and text exactly "Agent 模式".
     result = await zai_eval(session, agent_base, """(function(){
-        // Find the Agent 模式 button — it's a DIV with direct text node "Agent 模式"
-        var all = document.querySelectorAll('div');
-        for (var i = 0; i < all.length; i++) {
-            var el = all[i];
-            // Check direct text content (not including children)
-            var directText = '';
-            for (var j = 0; j < el.childNodes.length; j++) {
-                var n = el.childNodes[j];
-                if (n.nodeType === 3) directText += n.nodeValue;
-            }
-            directText = directText.trim();
-            if (directText === 'Agent 模式' || directText === 'Agent Mode') {
-                var r = el.getBoundingClientRect();
-                if (r.width > 0 && r.height > 0) {
-                    el.click();
-                    return 'clicked';
-                }
-            }
+        // Find the Agent 模式 BUTTON (not the DIV) — React listens for
+        // clicks on the BUTTON element, not its children.
+        var btns = document.querySelectorAll('button');
+        var agentBtn = null;
+        var chatBtn = null;
+        for (var i = 0; i < btns.length; i++) {
+            var btn = btns[i];
+            var text = (btn.innerText || '').trim();
+            if (text === 'Agent 模式' || text === 'Agent Mode') agentBtn = btn;
+            if (text === 'Chat 模式' || text === 'Chat Mode') chatBtn = btn;
         }
-        // Fallback: check if already in Agent mode (look for Agent-mode-specific UI)
-        var body = document.body ? document.body.innerText : '';
-        if (body.indexOf('深度思考') >= 0 || body.indexOf('最高') >= 0) {
-            // These are Agent-mode-only features
+
+        // Check if already in Agent mode via data-active attribute
+        if (agentBtn && agentBtn.getAttribute('data-active') === 'true') {
             return 'already_agent';
         }
+
+        if (agentBtn) {
+            // Click the BUTTON (parent), not the DIV child.
+            // React 18 uses event delegation — clicks on the BUTTON trigger
+            // the onClick handler, but clicks on child DIVs may not.
+            agentBtn.click();
+
+            // Also dispatch a full pointer event sequence (React 18 listens
+            // for pointerdown/pointerup in addition to click)
+            var rect = agentBtn.getBoundingClientRect();
+            var cx = rect.x + rect.width / 2;
+            var cy = rect.y + rect.height / 2;
+            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(name) {
+                var EvtCtor = name.startsWith('pointer') ? window.PointerEvent : window.MouseEvent;
+                agentBtn.dispatchEvent(new EvtCtor(name, {
+                    bubbles: true, cancelable: true, view: window,
+                    clientX: cx, clientY: cy, button: 0
+                }));
+            });
+            return 'clicked';
+        }
         return 'not_found';
-    })()""")
+    })()""", timeout=15)
     log(profile_id, f"Agent mode switch: {result}")
-    await asyncio.sleep(3)
+
+    # Verify the switch worked by checking data-active after a short delay
+    if result == 'clicked':
+        await asyncio.sleep(2)
+        verify = await zai_eval(session, agent_base, """(function(){
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+                var btn = btns[i];
+                if ((btn.innerText || '').trim() === 'Agent 模式') {
+                    return btn.getAttribute('data-active') === 'true' ? 'verified' : 'failed';
+                }
+            }
+            return 'not_found';
+        })()""", timeout=10)
+        if verify == 'verified':
+            log(profile_id, "Agent mode verified (data-active=true)")
+        else:
+            log(profile_id, f"Agent mode verification: {verify}")
+        result = verify if verify == 'verified' else result
+
+    await asyncio.sleep(1)
     return result
 
 
@@ -1374,16 +1412,27 @@ async def run_bridge(profile_id, agent_port, db_path):
                 check = await zai_eval(session, agent_base, """(function(){
                     var input = document.querySelector('#chat-input, textarea[class*="chat-input"], div[contenteditable="true"]');
                     var hasInput = input && input.getBoundingClientRect().width > 0;
-                    var body = document.body ? document.body.innerText : '';
-                    // Agent mode indicators (any one is enough)
-                    var hasAgent = body.indexOf('Agent') >= 0 || body.indexOf('深度思考') >= 0
-                        || body.indexOf('新聊天') >= 0 || body.indexOf('新任务') >= 0;
-                    return JSON.stringify({agent_mode: hasAgent, has_input: hasInput});
+                    // Check Agent mode via data-active attribute (reliable)
+                    var agentActive = false;
+                    var btns = document.querySelectorAll('button');
+                    for (var i = 0; i < btns.length; i++) {
+                        if ((btns[i].innerText || '').trim() === 'Agent 模式' &&
+                            btns[i].getAttribute('data-active') === 'true') {
+                            agentActive = true;
+                            break;
+                        }
+                    }
+                    return JSON.stringify({agent_mode: agentActive, has_input: hasInput});
                 })()""")
                 if isinstance(check, str):
                     try: check = json.loads(check)
                     except: pass
                 if isinstance(check, dict) and check.get("has_input"):
+                    # Also ensure Agent mode is active — switch if not
+                    if not check.get("agent_mode"):
+                        log(profile_id, f"Agent mode not active, switching (attempt {ready_attempt+1}/10)...")
+                        await zai_switch_to_agent_mode(session, agent_base, profile_id)
+                        continue
                     ready = True
                     break
                 log(profile_id, f"waiting for z.ai ready (attempt {ready_attempt+1}/10)...")
