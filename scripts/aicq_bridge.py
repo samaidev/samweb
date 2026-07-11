@@ -908,33 +908,19 @@ async def run_bridge(profile_id, agent_port, db_path):
                 stable_count = 0
                 chat_url = f"https://chat.z.ai/c/{first_chat_id}"
 
-                for refresh_cycle in range(120):  # 120 × 60s = 2h max
-                    # Step 1: Navigate to the chat URL via CDP (bypasses JS)
-                    log(profile_id, f"auto-stream refresh {refresh_cycle+1}/120...")
-                    try:
-                        # Use CDP-eval to set location (may timeout if JS blocked,
-                        # but the navigation still happens in the browser)
-                        await session.post(f"{agent_base}/agent/cdp-eval",
-                            json={"script": f"window.location.href = '{chat_url}'"},
-                            timeout=aiohttp.ClientTimeout(total=3))
-                    except: pass
-
-                    # Step 2: Wait for SPA to load (10s)
-                    await asyncio.sleep(10)
-
-                    # Step 3: Try to read the last assistant message
-                    # After page reload, JS should be available
+                for refresh_cycle in range(720):  # 720 × 10s = 2h max
+                    # Read last assistant message via /agent/cdp-eval
+                    # Don't refresh page (that breaks CDP WebSocket connection).
+                    # Just keep polling — z.ai JS has brief gaps between
+                    # task execution steps where eval succeeds.
+                    log(profile_id, f"auto-stream poll {refresh_cycle+1}/720...")
                     result = ""
-                    for eval_attempt in range(5):
-                        try:
-                            result = await zai_eval(session, agent_base,
-                                "document.querySelector('.chat-assistant:last-of-type')?.innerHTML || ''",
-                                timeout=5)
-                            if result and len(result) > 20:
-                                break
-                        except:
-                            pass
-                        await asyncio.sleep(3)
+                    try:
+                        result = await zai_eval(session, agent_base,
+                            "document.querySelector('.chat-assistant:last-of-type')?.innerHTML || ''",
+                            timeout=5)
+                    except:
+                        pass
 
                     if isinstance(result, str) and len(result) > 20:
                         if result != last_sent_text:
