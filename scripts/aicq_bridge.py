@@ -82,23 +82,71 @@ def log(profile_id, msg):
 async def zai_dom_text(session, agent_base, selector, timeout=15):
     """Read element HTML via CDP DOM domain (bypasses JS thread).
     Works even when z.ai's JS is blocked during task execution.
+
+    CRITICAL: Uses asyncio.wait_for as a HARD timeout — same reason as
+    zai_eval. The CDP DOM domain call can also hang if the CDP WebSocket
+    connection is stale.
     """
-    try:
+    async def _do_dom():
         resp = await session.post(f"{agent_base}/agent/cdp-dom-text",
                                   json={"selector": selector},
                                   timeout=aiohttp.ClientTimeout(total=timeout))
         data = await resp.json()
         return data.get("html", "")
-    except Exception as e:
+    try:
+        return await asyncio.wait_for(_do_dom(), timeout=timeout)
+    except asyncio.TimeoutError:
         return ""
+    except Exception:
+        return ""
+
+
+async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15):
+    """Read z.ai's latest assistant response via CDP DOM domain.
+
+    This is the FALLBACK when zai_eval times out (z.ai JS thread blocked).
+    The DOM domain reads element HTML directly via CDP WebSocket — it does
+    NOT require the page's JS thread to be free.
+
+    Returns a dict {stage, response} similar to the eval-based check:
+      - {stage:'responding', response: '<html>...'} — response found
+      - {stage:'waiting'} — no new assistant messages
+      - {stage:'error', error: '...'} — error message detected
+    """
+    # Try multiple selectors for the assistant message container
+    selectors = [
+        '[class*="chat-assistant"]',
+        '[class*="assistant-message"]',
+        '[class*="agent-message"]',
+        '[class*="markdown-prose"]',
+        '[class*="prose"]',
+    ]
+    for sel in selectors:
+        html = await zai_dom_text(session, agent_base, sel, timeout=timeout)
+        if html and len(html) > 20:
+            # Check for error messages
+            if any(err in html for err in ['回复内容为空', '请稍后重试', '限制沙箱',
+                                             '当前模型使用人数较多', '用量已超出',
+                                             '超出个人限制', 'Sandbox limit']):
+                return {"stage": "error", "error": html[:200]}
+            # Return the HTML as the response
+            return {"stage": "responding", "response": html}
+    return {"stage": "waiting"}
 
 
 async def zai_eval(session, agent_base, script, timeout=10):
     """Run a JS eval on the tab worker's z.ai page via CDP Runtime.evaluate.
     Uses /agent/cdp-eval (not /agent/eval) because tab workers don't have
     the samweb UI bootstrap JS injected, so the dispatch-based eval times out.
+
+    CRITICAL: Uses asyncio.wait_for as a HARD timeout. When z.ai's JS thread
+    is blocked (e.g. processing a ReadableStream from chat/completions),
+    Runtime.evaluate hangs indefinitely. The aiohttp client timeout may not
+    fire if the server is streaming the response. asyncio.wait_for guarantees
+    the call returns within `timeout` seconds, preventing the bridge's polling
+    loop from getting stuck.
     """
-    try:
+    async def _do_eval():
         resp = await session.post(f"{agent_base}/agent/cdp-eval",
                                   json={"script": script},
                                   timeout=aiohttp.ClientTimeout(total=timeout))
@@ -112,6 +160,10 @@ async def zai_eval(session, agent_base, script, timeout=10):
             except Exception:
                 pass
         return value
+    try:
+        return await asyncio.wait_for(_do_eval(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return None
     except Exception as e:
         log("?", f"zai_eval error: {e}")
         return None
@@ -173,17 +225,22 @@ async def fetch_poll_and_get_chunks(session, agent_base):
     offset, timestamp.
 
     Returns a list of new chunks (may be empty).
+
+    CRITICAL: Uses asyncio.wait_for as a HARD timeout to prevent the
+    bridge's polling loop from getting stuck if the agent server hangs.
     """
-    try:
-        # First, trigger a snapshot of all paused requests
+    async def _do_poll():
         await session.post(f"{agent_base}/agent/fetch-poll",
                            json={},
                            timeout=aiohttp.ClientTimeout(total=10))
-        # Then retrieve the new chunks (this clears the buffer)
         resp = await session.get(f"{agent_base}/agent/fetch-chunks",
                                  timeout=aiohttp.ClientTimeout(total=10))
         data = await resp.json()
         return data if isinstance(data, list) else []
+    try:
+        return await asyncio.wait_for(_do_poll(), timeout=15)
+    except asyncio.TimeoutError:
+        return []
     except Exception as e:
         log("?", f"fetch_poll error: {e}")
         return []
@@ -1651,8 +1708,10 @@ async def run_bridge(profile_id, agent_port, db_path):
                 # Step 1b: Also check SSE messages (legacy — z.ai may use
                 # SSE for some endpoints). Bypasses JS thread.
                 try:
-                    sse_resp = await session.get(f"{agent_base}/agent/sse-messages",
-                        timeout=aiohttp.ClientTimeout(total=10))
+                    sse_resp = await asyncio.wait_for(
+                        session.get(f"{agent_base}/agent/sse-messages",
+                            timeout=aiohttp.ClientTimeout(total=10)),
+                        timeout=15)
                     sse_data = await sse_resp.json()
                     sse_msgs = sse_data if isinstance(sse_data, list) else []
                     if sse_msgs:
@@ -1708,10 +1767,15 @@ async def run_bridge(profile_id, agent_port, db_path):
                         pass
 
                 # Get current z.ai response text (only NEW messages after pre_count)
-                # Use try/except — z.ai may block JS during task execution
-                # (e.g. running bash commands). Don't break the polling loop.
-                try:
-                    result = await zai_eval(session, agent_base, f"""(function(){{
+                # PRIMARY: CDP DOM domain (bypasses JS thread entirely — works
+                # even when z.ai's JS is blocked by ReadableStream processing).
+                # FALLBACK: eval (if DOM domain returns nothing).
+                result = await zai_read_response_via_dom(
+                    session, agent_base, pre_count=pre_count, timeout=15)
+                if not result or result.get("stage") not in ("responding", "error"):
+                    # DOM domain didn't find a response — try eval as fallback
+                    try:
+                        result = await zai_eval(session, agent_base, f"""(function(){{
                     var sels = [
                         '[class*="chat-assistant"]',
                         '[class*="assistant-message"]',
@@ -1760,19 +1824,13 @@ async def run_bridge(profile_id, agent_port, db_path):
                     if (r && rText.length > 10) return JSON.stringify({{stage:'responding', response: r}});
                     return JSON.stringify({{stage:'loading'}});
                 }})()""")
-                except Exception as e:
-                    # z.ai JS is blocked during task execution.
-                    # eval timeout is 10s — don't block the polling loop.
-                    # Try DOM domain fallback (also may timeout, but 15s).
-                    # If both fail, just continue to next poll.
-                    log(profile_id, f"eval timeout (z.ai busy), poll {poll+1}/{max_polls}")
-                    result = {}
-                    # Update AICQ status bar so user knows we're alive
-                    if core and from_id and poll % 6 == 0:
-                        try:
-                            await core.send_stream_chunk(from_id, "thinking",
-                                f"z.ai 执行中... (已等待 {(poll+1)*10}s)")
-                        except: pass
+                    except Exception as e:
+                        log(profile_id, f"eval error: {e}")
+                        result = {}
+                else:
+                    # DOM domain found a response — log it
+                    if result.get("stage") == "responding":
+                        log(profile_id, f"DOM primary got response ({len(result.get('response',''))} chars, poll {poll+1}/{max_polls})")
 
                 if isinstance(result, str):
                     try:

@@ -956,7 +956,19 @@ func (c *Client) handleFetchPaused(params json.RawMessage) {
                 strings.Contains(contentType, "octet-stream")
 
         if isStreaming {
-                // Keep paused — record for incremental body chunk polling.
+                // Streaming response (text/event-stream). Snapshot whatever
+                // body has accumulated so far, then CONTINUE the request
+                // immediately. We do NOT keep it paused — keeping it paused
+                // would prevent z.ai's JS from receiving the response body,
+                // which means the UI would never render the response.
+                //
+                // By continuing immediately, z.ai's fetch() promise resolves
+                // and the UI renders the response. Our eval-based polling
+                // (with DOM domain fallback) then reads the rendered DOM.
+                //
+                // We still snapshot the body first (in a goroutine) so the
+                // bridge can use the raw stream data as a fallback if the
+                // eval-based polling can't read the DOM.
                 c.fetchMu.Lock()
                 if c.fetchPaused == nil {
                         c.fetchPaused = map[string]int64{}
@@ -967,8 +979,12 @@ func (c *Client) handleFetchPaused(params json.RawMessage) {
                 }
                 c.fetchURLs[ev.RequestID] = ev.Request.URL
                 c.fetchMu.Unlock()
-                log.Printf("[cdp] Fetch.requestPaused (STREAMING, kept paused): %s %s [content-type=%s]",
+                log.Printf("[cdp] Fetch.requestPaused (STREAMING, snapshot+continue): %s %s [content-type=%s]",
                         ev.Request.Method, ev.Request.URL, contentType)
+                go func() {
+                        c.snapshotFetchBody(ev.RequestID, ev.Request.URL, ev.Timestamp)
+                        c.continueFetchRequest(ev.RequestID)
+                }()
         } else {
                 // Non-streaming — snapshot body and continue immediately.
                 log.Printf("[cdp] Fetch.requestPaused (non-streaming, continuing): %s %s [content-type=%s]",

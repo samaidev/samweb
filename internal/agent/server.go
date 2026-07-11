@@ -693,6 +693,13 @@ func (s *Server) handleListTabWorkers(w http.ResponseWriter, r *http.Request) {
 // handleCDPEval runs a JS eval via CDP Runtime.evaluate (bypasses the
 // dispatch layer). Used by tab workers which don't have bootstrap JS.
 // POST /agent/cdp-eval {"script":"..."} → {"value":<result>}
+//
+// Timeout: 15 seconds. When z.ai's JS thread is blocked (e.g. during
+// ReadableStream processing in chat/completions), Runtime.evaluate hangs
+// until the JS thread is free. A 15s timeout ensures the bridge's
+// polling loop doesn't get stuck for minutes waiting for a blocked JS
+// thread. The bridge's HTTP client timeout is 10s, so it will timeout
+// first and retry on the next poll.
 func (s *Server) handleCDPEval(w http.ResponseWriter, r *http.Request) {
         var opts EvalOpts
         if err := readJSON(r, &opts); err != nil {
@@ -703,7 +710,7 @@ func (s *Server) handleCDPEval(w http.ResponseWriter, r *http.Request) {
                 writeError(w, http.StatusBadRequest, "script is required")
                 return
         }
-        ctx, cancel := ctxWithTimeout(r.Context(), 300*time.Second)
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
         defer cancel()
         val, err := s.backend.CDPEval(ctx, opts.Script)
         if err != nil {
