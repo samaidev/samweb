@@ -820,21 +820,61 @@ async def run_bridge(profile_id, agent_port, db_path):
         # If so, stream the ongoing output to AICQ automatically.
         if first_chat_id:
             log(profile_id, "checking if z.ai is still generating...")
-            is_gen = await zai_eval(session, agent_base, """(function(){
-                // Check for visible stop/generating buttons or spinners
-                var stopBtns = document.querySelectorAll('button[class*="stop"], button[title*="停止"], button[title*="Stop"]');
-                for (var i = 0; i < stopBtns.length; i++) {
-                    var r = stopBtns[i].getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0) return 'generating';
-                }
-                var spinners = document.querySelectorAll('[class*="spin"], [class*="loading"], [class*="generating"], [class*="thinking"]');
-                for (var i = 0; i < spinners.length; i++) {
-                    var r = spinners[i].getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0) return 'generating';
-                }
-                return 'idle';
+            # Detect generation by checking if the last assistant message
+            # content changes over 6 seconds (3 polls × 2s).
+            pre_count_check = await zai_eval(session, agent_base, """(function(){
+                var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                var asst = [];
+                for (var s = 0; s < sels.length; s++) { var f = document.querySelectorAll(sels[s]); for (var i = 0; i < f.length; i++) asst.push(f[i]); }
+                var seen = {};
+                asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+                asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
+                if (asst.length === 0) return JSON.stringify({count: 0, last_text: ''});
+                var last = asst[asst.length-1];
+                return JSON.stringify({count: asst.length, last_text: (last.innerText||'').slice(0,500)});
             })()""")
-            if is_gen == 'generating':
+            if isinstance(pre_count_check, str):
+                try: pre_count_check = json.loads(pre_count_check)
+                except: pre_count_check = {}
+            
+            is_generating = False
+            if isinstance(pre_count_check, dict) and pre_count_check.get("count", 0) > 0:
+                # Check if content changes over 6 seconds
+                text1 = pre_count_check.get("last_text", "")
+                await asyncio.sleep(3)
+                check2 = await zai_eval(session, agent_base, """(function(){
+                    var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                    var asst = [];
+                    for (var s = 0; s < sels.length; s++) { var f = document.querySelectorAll(sels[s]); for (var i = 0; i < f.length; i++) asst.push(f[i]); }
+                    var seen = {};
+                    asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+                    asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
+                    if (asst.length === 0) return '';
+                    return (asst[asst.length-1].innerText||'').slice(0,500);
+                })()""")
+                text2 = check2 if isinstance(check2, str) else ""
+                if text1 != text2:
+                    is_generating = True
+                    log(profile_id, f"z.ai content changed! Still generating. (was {len(text1)} chars, now {len(text2)} chars)")
+                else:
+                    # Check one more time after 3 more seconds
+                    await asyncio.sleep(3)
+                    check3 = await zai_eval(session, agent_base, """(function(){
+                        var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                        var asst = [];
+                        for (var s = 0; s < sels.length; s++) { var f = document.querySelectorAll(sels[s]); for (var i = 0; i < f.length; i++) asst.push(f[i]); }
+                        var seen = {};
+                        asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+                        asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
+                        if (asst.length === 0) return '';
+                        return (asst[asst.length-1].innerText||'').slice(0,500);
+                    })()""")
+                    text3 = check3 if isinstance(check3, str) else ""
+                    if text2 != text3:
+                        is_generating = True
+                        log(profile_id, f"z.ai content changed on 2nd check! Still generating. (was {len(text2)} chars, now {len(text3)} chars)")
+            
+            if is_generating:
                 log(profile_id, "z.ai is still generating! Starting auto-stream...")
                 # Record pre_count (messages before the current generation)
                 pre_count = await zai_eval(session, agent_base, """(function(){
