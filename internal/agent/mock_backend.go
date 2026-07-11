@@ -276,6 +276,10 @@ func (m *MockBackend) CDPEval(ctx context.Context, script string) (json.RawMessa
         return nil, fmt.Errorf("CDPEval not supported on mock backend")
 }
 
+func (m *MockBackend) CDPDOMText(ctx context.Context, selector string) (string, error) {
+        return "", fmt.Errorf("CDPDOMText not supported on mock backend")
+}
+
 func (m *MockBackend) SpawnTab(ctx context.Context, profileID, url string) (TabWorkerInfo, error) {
         return TabWorkerInfo{}, fmt.Errorf("SpawnTab not supported on mock backend")
 }

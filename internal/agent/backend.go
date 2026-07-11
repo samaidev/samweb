@@ -83,6 +83,10 @@ type Backend interface {
         // dispatch layer). Used by tab workers which don't have the
         // samweb UI bootstrap JS injected.
         CDPEval(ctx context.Context, script string) (json.RawMessage, error)
+
+        // CDPDOMText reads element HTML via CDP DOM domain (bypasses JS
+        // thread). Used when z.ai's JS is blocked during task execution.
+        CDPDOMText(ctx context.Context, selector string) (string, error)
         Wait(ctx context.Context, selector string, timeoutMs int) error
         Elements(ctx context.Context, selector string) ([]Element, error)
         Element(ctx context.Context, selector string) (*Element, error)

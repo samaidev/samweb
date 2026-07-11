@@ -113,6 +113,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
         mux.HandleFunc("/agent/eval", s.handleEval)
         mux.HandleFunc("/agent/cdp-eval", s.handleCDPEval)
+        mux.HandleFunc("/agent/cdp-dom-text", s.handleCDPDOMText)
         mux.HandleFunc("/agent/wait", s.handleWait)
         mux.HandleFunc("/agent/elements", s.handleElements)
         mux.HandleFunc("/agent/element", s.handleElement)
@@ -704,6 +705,31 @@ func (s *Server) handleCDPEval(w http.ResponseWriter, r *http.Request) {
                 val = json.RawMessage("null")
         }
         writeJSON(w, http.StatusOK, EvalResult{Value: val})
+}
+
+// handleCDPDOMText reads element HTML via CDP DOM domain (bypasses JS).
+// POST /agent/cdp-dom-text {"selector":".chat-assistant:last-child"}
+// → {"html":"<div class='chat-assistant'>...</div>"}
+func (s *Server) handleCDPDOMText(w http.ResponseWriter, r *http.Request) {
+        var body struct {
+                Selector string `json:"selector"`
+        }
+        if err := readJSON(r, &body); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if body.Selector == "" {
+                writeError(w, http.StatusBadRequest, "selector is required")
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        html, err := s.backend.CDPDOMText(ctx, body.Selector)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, map[string]string{"html": html})
 }
 
 // handleBreakthrough automatically detects and bypasses slider captchas.

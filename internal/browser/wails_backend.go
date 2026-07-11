@@ -642,6 +642,20 @@ func (b *WailsBackend) CDPEval(ctx context.Context, script string) (json.RawMess
         return wrap.Result.Value, nil
 }
 
+// CDPDOMText reads element HTML via CDP DOM domain (DOM.getDocument →
+// DOM.querySelector → DOM.getOuterHTML). This bypasses the JS thread
+// entirely, so it works even when z.ai's JS is blocked during task
+// execution (e.g. running bash commands for minutes).
+func (b *WailsBackend) CDPDOMText(ctx context.Context, selector string) (string, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return "", fmt.Errorf("CDP client not connected")
+        }
+        return c.GetDOMText(selector)
+}
+
 func (b *WailsBackend) Wait(ctx context.Context, selector string, timeoutMs int) error {
         return b.dispatchVoid(ctx, "wait", map[string]interface{}{
                 "selector":  selector,

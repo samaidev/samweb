@@ -79,6 +79,20 @@ def log(profile_id, msg):
 
 # ---------- z.ai DOM automation helpers ----------
 
+async def zai_dom_text(session, agent_base, selector, timeout=15):
+    """Read element HTML via CDP DOM domain (bypasses JS thread).
+    Works even when z.ai's JS is blocked during task execution.
+    """
+    try:
+        resp = await session.post(f"{agent_base}/agent/cdp-dom-text",
+                                  json={"selector": selector},
+                                  timeout=aiohttp.ClientTimeout(total=timeout))
+        data = await resp.json()
+        return data.get("html", "")
+    except Exception as e:
+        return ""
+
+
 async def zai_eval(session, agent_base, script, timeout=120):
     """Run a JS eval on the tab worker's z.ai page via CDP Runtime.evaluate.
     Uses /agent/cdp-eval (not /agent/eval) because tab workers don't have
@@ -1185,8 +1199,21 @@ async def run_bridge(profile_id, agent_port, db_path):
                     return JSON.stringify({{stage:'loading'}});
                 }})()""")
                 except Exception as e:
-                    log(profile_id, f"eval timeout/error (z.ai may be busy): {e}")
-                    result = {}
+                    # z.ai JS is blocked — use CDP DOM domain (bypasses JS)
+                    log(profile_id, f"eval timeout, falling back to DOM domain")
+                    # Read the last chat-assistant element via DOM API
+                    html = await zai_dom_text(session, agent_base,
+                        ".chat-assistant:last-of-type")
+                    if html and len(html) > 20:
+                        # Extract text from HTML for limit detection
+                        import re as _re
+                        text_only = _re.sub(r'<[^>]+>', '', html).strip()
+                        if text_only and len(text_only) > 10:
+                            result = {"stage": "responding", "response": html}
+                        else:
+                            result = {}
+                    else:
+                        result = {}
 
                 if isinstance(result, str):
                     try:
