@@ -28,3 +28,7 @@ __pycache__/
 
 # Go
 vendor/
+skills/
+download/
+*.png
+*.log
