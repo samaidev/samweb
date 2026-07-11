@@ -815,6 +815,120 @@ async def run_bridge(profile_id, agent_port, db_path):
             # message continues in the selected chat.
             chat_map["1000008"] = first_chat_id
 
+        # Step 3b: Check if z.ai is currently generating a response
+        # (e.g. a task was running before the browser was restarted).
+        # If so, stream the ongoing output to AICQ automatically.
+        if first_chat_id:
+            log(profile_id, "checking if z.ai is still generating...")
+            is_gen = await zai_eval(session, agent_base, """(function(){
+                // Check for visible stop/generating buttons or spinners
+                var stopBtns = document.querySelectorAll('button[class*="stop"], button[title*="停止"], button[title*="Stop"]');
+                for (var i = 0; i < stopBtns.length; i++) {
+                    var r = stopBtns[i].getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) return 'generating';
+                }
+                var spinners = document.querySelectorAll('[class*="spin"], [class*="loading"], [class*="generating"], [class*="thinking"]');
+                for (var i = 0; i < spinners.length; i++) {
+                    var r = spinners[i].getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) return 'generating';
+                }
+                return 'idle';
+            })()""")
+            if is_gen == 'generating':
+                log(profile_id, "z.ai is still generating! Starting auto-stream...")
+                # Record pre_count (messages before the current generation)
+                pre_count = await zai_eval(session, agent_base, """(function(){
+                    var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                    var asst = [];
+                    for (var s = 0; s < sels.length; s++) { var f = document.querySelectorAll(sels[s]); for (var i = 0; i < f.length; i++) asst.push(f[i]); }
+                    var seen = {};
+                    asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+                    asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
+                    return asst.length;
+                })()""")
+                if not isinstance(pre_count, int):
+                    try: pre_count = int(pre_count)
+                    except: pre_count = 0
+
+                # Auto-stream the ongoing generation
+                if core:
+                    try:
+                        await core.send_stream_chunk("1000008", "thinking", "检测到 z.ai 正在执行，接续输出中...")
+                    except: pass
+
+                last_sent_text = ""
+                stable_count = 0
+                for poll in range(100):
+                    result = await zai_eval(session, agent_base, f"""(function(){{
+                        var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                        var asst = [];
+                        for (var s = 0; s < sels.length; s++) {{ var f = document.querySelectorAll(sels[s]); for (var i = 0; i < f.length; i++) asst.push(f[i]); }}
+                        var seen = {{}};
+                        asst = asst.filter(function(el){{var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;}});
+                        asst = asst.filter(function(el){{var c=(el.className||'').toString();return c.indexOf('chat-user')<0;}});
+                        var preCount = {pre_count};
+                        var newMsgs = asst.slice(preCount);
+                        if (newMsgs.length === 0) return JSON.stringify({{stage:'waiting'}});
+                        var last = newMsgs[newMsgs.length-1];
+                        var ft = (last.innerText || '').trim();
+                        if (/回复内容为空|请稍后重试|限制沙箱|当前模型使用人数较多|用量已超出|超出个人限制/.test(ft))
+                            return JSON.stringify({{stage:'error', error: ft.slice(0,200)}});
+                        var lastClass = (last.className||'').toString();
+                        var ce = null;
+                        if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {{
+                            ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+                        }}
+                        if (!ce) {{ var ds = last.querySelectorAll('div');
+                            for (var i=ds.length-1;i>=0;i--){{var d=ds[i];var c=(d.className||'').toString();
+                            if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){{ce=d;break;}}}}}}
+                        var r = ce ? (ce.innerHTML||'').trim() : (last.innerHTML||'').trim();
+                        var rText = ce ? (ce.innerText||'').trim() : ft;
+                        if (r && rText.length > 10) return JSON.stringify({{stage:'responding', response: r}});
+                        return JSON.stringify({{stage:'loading'}});
+                    }})()""")
+                    if isinstance(result, str):
+                        try: result = json.loads(result)
+                        except: pass
+                    if not isinstance(result, dict):
+                        result = {}
+                    stage = result.get("stage", "")
+                    current_text = result.get("response", "")
+                    if stage == "responding" and current_text:
+                        if current_text != last_sent_text:
+                            if core:
+                                try: await core.send_stream_chunk("1000008", "text", current_text)
+                                except: pass
+                            last_sent_text = current_text
+                            stable_count = 0
+                            log(profile_id, f"auto-streaming... ({len(current_text)} chars)")
+                        else:
+                            stable_count += 1
+                            if stable_count >= 6:
+                                log(profile_id, f"auto-stream complete ({len(current_text)} chars)")
+                                if core:
+                                    try: await core.send_stream_end("1000008")
+                                    except: pass
+                                break
+                            if core:
+                                try: await core.send_stream_chunk("1000008", "thinking", f"z.ai 执行中... ({len(current_text)} 字)")
+                                except: pass
+                    elif stage == "error":
+                        if core:
+                            try: await core.send_stream_end("1000008")
+                            except: pass
+                        break
+                    await asyncio.sleep(3)
+                else:
+                    if core:
+                        try:
+                            if last_sent_text:
+                                await core.send_stream_chunk("1000008", "text", last_sent_text)
+                            await core.send_stream_end("1000008")
+                        except: pass
+                log(profile_id, "auto-stream finished")
+            else:
+                log(profile_id, "z.ai is idle, waiting for messages")
+
         async def on_message(msg):
             try:
                 from_id = msg.get("from_id", msg.get("from", ""))
