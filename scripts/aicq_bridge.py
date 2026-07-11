@@ -921,6 +921,26 @@ async def run_bridge(profile_id, agent_port, db_path):
                 await core.send_message(from_id, f"发送失败: {send_result}")
                 continue
 
+            # Record the number of assistant messages BEFORE sending,
+            # so we only stream NEW responses (not old ones from the
+            # chat history).
+            pre_count = await zai_eval(session, agent_base, """(function(){
+                var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                var asst = [];
+                for (var s = 0; s < sels.length; s++) {
+                    var f = document.querySelectorAll(sels[s]);
+                    for (var i = 0; i < f.length; i++) asst.push(f[i]);
+                }
+                var seen = {};
+                asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+                asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
+                return asst.length;
+            })()""")
+            if not isinstance(pre_count, int):
+                try: pre_count = int(pre_count)
+                except: pre_count = 0
+            log(profile_id, f"assistant messages before send: {pre_count}")
+
             # Stream z.ai's response to AICQ in real-time.
             # Poll z.ai every 3s, send new text as stream chunks.
             # Finish when z.ai's output hasn't changed for 3 consecutive
@@ -967,8 +987,8 @@ async def run_bridge(profile_id, agent_port, db_path):
                     except Exception:
                         pass
 
-                # Get current z.ai response text
-                result = await zai_eval(session, agent_base, """(function(){
+                # Get current z.ai response text (only NEW messages after pre_count)
+                result = await zai_eval(session, agent_base, f"""(function(){{
                     var sels = [
                         '[class*="chat-assistant"]',
                         '[class*="assistant-message"]',
@@ -977,43 +997,43 @@ async def run_bridge(profile_id, agent_port, db_path):
                         '[class*="prose"]'
                     ];
                     var asst = [];
-                    for (var s = 0; s < sels.length; s++) {
+                    for (var s = 0; s < sels.length; s++) {{
                         var f = document.querySelectorAll(sels[s]);
                         for (var i = 0; i < f.length; i++) asst.push(f[i]);
-                    }
-                    var seen = {};
-                    asst = asst.filter(function(el){
+                    }}
+                    var seen = {{}};
+                    asst = asst.filter(function(el){{
                         var k = el.outerHTML.slice(0,200);
                         if (seen[k]) return false;
                         seen[k] = true;
                         return true;
-                    });
-                    if (asst.length === 0) return JSON.stringify({stage:'waiting'});
-                    var last = asst[asst.length-1];
+                    }});
+                    asst = asst.filter(function(el){{var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;}});
+                    // Only look at messages AFTER the pre_count (new responses)
+                    var preCount = {pre_count};
+                    var newMsgs = asst.slice(preCount);
+                    if (newMsgs.length === 0) return JSON.stringify({{stage:'waiting'}});
+                    var last = newMsgs[newMsgs.length-1];
                     var ft = (last.innerText || '').trim();
-                    if (/回复内容为空|请稍后重试|限制沙箱|当前模型使用人数较多/.test(ft))
-                        return JSON.stringify({stage:'error', error: ft.slice(0,200)});
-                    // If last element itself has 'prose' class, use its innerText directly
-            // (z.ai's chat-assistant has class "chat-assistant ... markdown-prose")
-            var lastClass = (last.className||'').toString();
-            var ce = null;
-            if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {
-                ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
-            }
-                    if (!ce) {
+                    if (/回复内容为空|请稍后重试|限制沙箱|当前模型使用人数较多|用量已超出|超出个人限制/.test(ft))
+                        return JSON.stringify({{stage:'error', error: ft.slice(0,200)}});
+                    var lastClass = (last.className||'').toString();
+                    var ce = null;
+                    if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {{
+                        ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
+                    }}
+                    if (!ce) {{
                         var ds = last.querySelectorAll('div');
-                        for (var i = ds.length-1; i >= 0; i--) {
+                        for (var i = ds.length-1; i >= 0; i--) {{
                             var d = ds[i];
                             var c = (d.className || '').toString();
-                            if (!/thinking|reasoning|action|toolCallTrace/i.test(c) && d.innerText.trim().length > 50) {
-                                ce = d; break;
-                            }
-                        }
-                    }
-                    var r = ce ? (ce.innerText || '').trim() : ft;
-                    if (r && r.length > 10) return JSON.stringify({stage:'responding', response: r});
-                    return JSON.stringify({stage:'loading'});
-                })()""")
+                            if (!/thinking|reasoning|action|toolCallTrace/i.test(c) && d.innerText.trim().length > 50) {{ ce = d; break; }}
+                        }}
+                    }}
+                    var r = ce ? (ce.innerText||'').trim() : ft;
+                    if (r && r.length > 10) return JSON.stringify({{stage:'responding', response: r}});
+                    return JSON.stringify({{stage:'loading'}});
+                }})()""")
 
                 if isinstance(result, str):
                     try:
