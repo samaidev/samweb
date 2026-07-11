@@ -1381,6 +1381,7 @@ async def run_bridge(profile_id, agent_port, db_path):
         # Default behavior: subsequent messages from the same friend
         # continue in the same z.ai chat. "/new" creates a fresh chat.
         chat_map = {}
+        chat_sessions = {}  # from_id → aicq session_id (for new chat detection)
         if first_chat_id:
             # Pre-populate chat_map for the owner (1000008) so the first
             # message continues in the selected chat.
@@ -1572,6 +1573,18 @@ async def run_bridge(profile_id, agent_port, db_path):
 
         async def on_message(msg):
             try:
+                # Log the full message dict to understand what fields aicq.me sends
+                # (especially for detecting "new chat" / "new session" signals)
+                msg_keys = list(msg.keys()) if isinstance(msg, dict) else []
+                log(profile_id, f"on_message keys: {msg_keys}")
+                if isinstance(msg, dict):
+                    # Log non-content fields for debugging
+                    for k in msg_keys:
+                        if k not in ('content', 'data', 'from', 'from_id'):
+                            v = msg.get(k)
+                            if v is not None and v != "":
+                                log(profile_id, f"  msg.{k} = {str(v)[:200]}")
+
                 from_id = msg.get("from_id", msg.get("from", ""))
                 content = msg.get("content", "")
                 if from_id and from_id.startswith("ai_"):
@@ -1579,7 +1592,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                 clean = re.sub(r'<[^>]+>', '', content).strip()
                 if not clean:
                     return
-                await message_queue.put({"from": from_id, "content": clean})
+                await message_queue.put({"from": from_id, "content": clean, "raw_msg": msg})
             except Exception as e:
                 log(profile_id, f"on_message error: {e}")
 
@@ -1697,17 +1710,22 @@ async def run_bridge(profile_id, agent_port, db_path):
                     await core.send_message(from_id, "⚠️ 没有可释放的容器")
                 continue
 
-            # Default: continue in the same z.ai chat for this friend
-            # (context retention). Only create a new chat if we don't
-            # have one yet for this friend.
-            chat_id = chat_map.get(from_id)
+            # Default: ALWAYS create a new z.ai chat for each message.
+            # aicq.me's "New Chat" button (加号) doesn't send a session
+            # signal to the bridge, so we can't distinguish between
+            # "continue in same chat" and "new chat". Since z.ai Agent
+            # mode creates a workspace per chat, and users expect "New
+            # Chat" to start fresh, we always create a new z.ai chat.
+            # This matches user expectations and avoids workspace limit
+            # issues (old chats get released automatically).
+            #
+            # Exception: "/new" command already creates a new chat above.
+            # Exception: if this is the VERY FIRST message (no chat_map
+            # entry yet), we create a new chat normally.
+            log(profile_id, f"creating new z.ai chat for {from_id}")
+            chat_id = await zai_new_chat(session, agent_base, profile_id)
             if chat_id:
-                log(profile_id, f"continuing chat {chat_id} for {from_id}")
-            else:
-                # First message from this friend — create a new chat
-                chat_id = await zai_new_chat(session, agent_base, profile_id)
-                if chat_id:
-                    chat_map[from_id] = chat_id
+                chat_map[from_id] = chat_id
 
             # Type + send (with high-traffic retry)
             ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content_clean, core, from_id)
