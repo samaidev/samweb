@@ -46,6 +46,15 @@ type Client struct {
         sseMu       sync.Mutex
         sseMessages []SSEMessage
         sseEnabled  bool
+
+        // Fetch domain intercept: captures response bodies of z.ai's
+        // streaming API calls in real-time. Unlike Runtime.evaluate
+        // (which needs JS thread), Fetch.requestPaused events arrive
+        // via CDP WebSocket and work even when JS is blocked.
+        fetchMu       sync.Mutex
+        fetchEnabled  bool
+        fetchChunks   []string // accumulated response chunks
+        fetchRequestID string  // current intercepted request ID
 }
 
 // SSEMessage is a single Server-Sent Event message captured from the
