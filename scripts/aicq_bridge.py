@@ -894,7 +894,11 @@ async def run_bridge(profile_id, agent_port, db_path):
                     try: pre_count = int(pre_count)
                     except: pre_count = 0
 
-                # Auto-stream the ongoing generation
+                # Auto-stream the ongoing generation.
+                # Strategy: refresh the page every 30s to get latest output.
+                # z.ai JS is blocked during task execution, but after a page
+                # reload JS is briefly available — we read the chat history
+                # (which includes the latest assistant output) in that window.
                 if core:
                     try:
                         await core.send_stream_chunk("1000008", "thinking", "检测到 z.ai 正在执行，接续输出中...")
@@ -902,20 +906,37 @@ async def run_bridge(profile_id, agent_port, db_path):
 
                 last_sent_text = ""
                 stable_count = 0
-                for poll in range(1440):  # 1440 × 5s = 2h
-                    # Use a VERY simple eval — just get last chat-assistant innerHTML.
-                    # z.ai JS is intermittently blocked during task execution.
-                    # Use 3s timeout + 5s interval = try every 8s, catch JS gaps.
+                chat_url = f"https://chat.z.ai/c/{first_chat_id}"
+
+                for refresh_cycle in range(240):  # 240 × 30s = 2h max
+                    # Step 1: Reload the page via CDP navigate
+                    log(profile_id, f"auto-stream refresh {refresh_cycle+1}/240...")
                     try:
-                        result = await zai_eval(session, agent_base,
-                            "document.querySelector('.chat-assistant:last-of-type')?.innerHTML || ''",
-                            timeout=3)
-                    except Exception:
-                        if poll % 12 == 0:  # log every ~1 min
-                            log(profile_id, f"auto-stream eval timeout poll {poll+1}/1440")
-                        result = ""
+                        await session.post(f"{agent_base}/agent/cdp-eval",
+                            json={"script": f"window.location.href = '{chat_url}'"},
+                            timeout=aiohttp.ClientTimeout(total=5))
+                    except: pass
+
+                    # Step 2: Wait for page to load (5s)
+                    await asyncio.sleep(5)
+
+                    # Step 3: Try to read the last assistant message
+                    # JS should be available right after page load
+                    result = ""
+                    for eval_attempt in range(3):
+                        try:
+                            result = await zai_eval(session, agent_base,
+                                "document.querySelector('.chat-assistant:last-of-type')?.innerHTML || ''",
+                                timeout=5)
+                            if result and len(result) > 20:
+                                break
+                        except:
+                            pass
+                        await asyncio.sleep(2)
+
                     if isinstance(result, str) and len(result) > 20:
                         if result != last_sent_text:
+                            # New content! Send to AICQ
                             if core:
                                 try: await core.send_stream_chunk("1000008", "text", result)
                                 except: pass
@@ -923,31 +944,38 @@ async def run_bridge(profile_id, agent_port, db_path):
                             stable_count = 0
                             log(profile_id, f"auto-streaming... ({len(result)} chars)")
                         else:
+                            # Same content as last cycle
                             stable_count += 1
-                            if stable_count >= 6:
+                            if stable_count >= 4:
+                                # 4 cycles (2 min) with no change → done
                                 log(profile_id, f"auto-stream complete ({len(result)} chars)")
                                 if core:
                                     try: await core.send_stream_end("1000008")
                                     except: pass
                                 break
-                            if core and stable_count % 2 == 0:
+                            if core:
                                 try: await core.send_stream_chunk("1000008", "thinking",
-                                    f"z.ai 执行中... ({len(result)} 字)")
+                                    f"z.ai 执行中... ({len(result)} 字, 等待更新)")
                                 except: pass
-                    elif result == "" and core and poll % 6 == 0:
-                        try: await core.send_stream_chunk("1000008", "thinking",
-                            f"z.ai 执行中... (已等待 {(poll+1)*10}s)")
-                        except: pass
-                    await asyncio.sleep(5)
+                    else:
+                        # Couldn't read content (JS still blocked or page not loaded)
+                        if core and refresh_cycle % 4 == 0:
+                            try: await core.send_stream_chunk("1000008", "thinking",
+                                f"z.ai 执行中... (已等待 {(refresh_cycle+1)*30}s)")
+                            except: pass
+                        log(profile_id, f"auto-stream: no content read (cycle {refresh_cycle+1})")
+
+                    # Wait before next refresh cycle
+                    await asyncio.sleep(20)  # 5s load + 20s wait = ~25s per cycle
+
                 # auto-stream loop done
-                if not last_sent_text:
-                    log(profile_id, "auto-stream: no output captured")
-                else:
-                    # Send final stream_end if not already sent
+                if last_sent_text:
                     if core:
                         try: await core.send_stream_end("1000008")
                         except: pass
-                log(profile_id, "auto-stream finished")
+                    log(profile_id, f"auto-stream finished (sent {len(last_sent_text)} chars)")
+                else:
+                    log(profile_id, "auto-stream: no output captured")
             else:
                 log(profile_id, "z.ai is idle, waiting for messages")
 
