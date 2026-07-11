@@ -79,7 +79,7 @@ def log(profile_id, msg):
 
 # ---------- z.ai DOM automation helpers ----------
 
-async def zai_eval(session, agent_base, script, timeout=30):
+async def zai_eval(session, agent_base, script, timeout=60):
     """Run a JS eval on the tab worker's z.ai page via CDP Runtime.evaluate.
     Uses /agent/cdp-eval (not /agent/eval) because tab workers don't have
     the samweb UI bootstrap JS injected, so the dispatch-based eval times out.
