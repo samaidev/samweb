@@ -908,22 +908,24 @@ async def run_bridge(profile_id, agent_port, db_path):
                 stable_count = 0
                 chat_url = f"https://chat.z.ai/c/{first_chat_id}"
 
-                for refresh_cycle in range(240):  # 240 × 30s = 2h max
-                    # Step 1: Reload the page via CDP navigate
-                    log(profile_id, f"auto-stream refresh {refresh_cycle+1}/240...")
+                for refresh_cycle in range(120):  # 120 × 60s = 2h max
+                    # Step 1: Navigate to the chat URL via CDP (bypasses JS)
+                    log(profile_id, f"auto-stream refresh {refresh_cycle+1}/120...")
                     try:
+                        # Use CDP-eval to set location (may timeout if JS blocked,
+                        # but the navigation still happens in the browser)
                         await session.post(f"{agent_base}/agent/cdp-eval",
                             json={"script": f"window.location.href = '{chat_url}'"},
-                            timeout=aiohttp.ClientTimeout(total=5))
+                            timeout=aiohttp.ClientTimeout(total=3))
                     except: pass
 
-                    # Step 2: Wait for page to load (5s)
-                    await asyncio.sleep(5)
+                    # Step 2: Wait for SPA to load (10s)
+                    await asyncio.sleep(10)
 
                     # Step 3: Try to read the last assistant message
-                    # JS should be available right after page load
+                    # After page reload, JS should be available
                     result = ""
-                    for eval_attempt in range(3):
+                    for eval_attempt in range(5):
                         try:
                             result = await zai_eval(session, agent_base,
                                 "document.querySelector('.chat-assistant:last-of-type')?.innerHTML || ''",
@@ -932,7 +934,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 break
                         except:
                             pass
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(3)
 
                     if isinstance(result, str) and len(result) > 20:
                         if result != last_sent_text:
@@ -966,7 +968,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                         log(profile_id, f"auto-stream: no content read (cycle {refresh_cycle+1})")
 
                     # Wait before next refresh cycle
-                    await asyncio.sleep(20)  # 5s load + 20s wait = ~25s per cycle
+                    await asyncio.sleep(30)  # 10s load + 15s eval + 30s wait = ~55s per cycle
 
                 # auto-stream loop done
                 if last_sent_text:
