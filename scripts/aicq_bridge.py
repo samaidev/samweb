@@ -1970,17 +1970,18 @@ async def run_bridge(profile_id, agent_port, db_path):
                         stable_count = 0
                         log(profile_id, f"streaming... ({len(current_text)} chars)")
                     else:
-                        # Text unchanged — maybe z.ai is done, or maybe
-                        # it's between steps (thinking → tool call →
-                        # final answer). Use escalating wait strategy:
-                        #   stable 1-3: wait 3s each (normal poll)
-                        #   stable 4: wait 30s then check (1st fallback)
-                        #   stable 5: wait 30s then check (2nd fallback)
-                        #   stable 6: truly done
+                        # Text unchanged — z.ai may be done, or between steps.
+                        # SIMPLE strategy: wait 3 polls (30s total), then
+                        # consider the response complete and call stream_end.
+                        # This avoids the infinite loop where the re-check
+                        # found "new content" (a different length because it
+                        # used eval instead of DOM domain) and reset
+                        # stable_count to 0, causing the bridge to never
+                        # call stream_end.
                         stable_count += 1
-                        if stable_count >= 6:
-                            # Check if the final response is actually a
-                            # usage limit error (short error text)
+                        if stable_count >= 3:
+                            # Response is stable for 3 polls (30s) — done.
+                            # Check if the final response is a usage limit error
                             if is_usage_limit_error(current_text):
                                 log(profile_id, f"usage limit in response: {current_text[:60]}")
                                 bypass_ok = await zai_bypass_usage_limit(
@@ -2008,153 +2009,14 @@ async def run_bridge(profile_id, agent_port, db_path):
                                     except Exception as e:
                                         log(profile_id, f"stream_end error: {e}")
                                 break
-                        elif stable_count == 4:
-                            # 1st fallback: wait 30s, then re-check
-                            log(profile_id, f"stable {stable_count}, waiting 30s before re-check (1st fallback)...")
+                        else:
+                            # Stable 1-2: show status, keep waiting
                             if core and from_id:
                                 try:
                                     await core.send_stream_chunk(from_id, "thinking",
-                                        f"z.ai 执行中... 等待 30 秒确认 ({len(current_text)} 字)")
-                                except Exception:
-                                    pass
-                            await asyncio.sleep(30)
-                            # Re-check z.ai output
-                            recheck = await zai_eval(session, agent_base, """(function(){
-                                var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
-                                var asst = [];
-                                for (var s = 0; s < sels.length; s++) {
-                                    var f = document.querySelectorAll(sels[s]);
-                                    for (var i = 0; i < f.length; i++) asst.push(f[i]);
-                                }
-                                var seen = {};
-                                asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
-            // Exclude user messages (z.ai uses class "chat-user")
-            asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
-                                if (asst.length === 0) return JSON.stringify({stage:'waiting'});
-                                var last = asst[asst.length-1];
-                                var ft = (last.innerText || '').trim();
-                                // If last element itself has 'prose' class, use its innerText directly
-            // (z.ai's chat-assistant has class "chat-assistant ... markdown-prose")
-            var lastClass = (last.className||'').toString();
-            var ce = null;
-            if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {
-                ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
-            }
-                                if (!ce) { var ds = last.querySelectorAll('div');
-                                    for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
-                                    if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
-                                // Use innerHTML to preserve formatting (markdown/HTML).
-                    // aicq.me renders messages with marked.js which supports HTML.
-                    var r = ce ? (ce.innerHTML||'').trim() : (last.innerHTML||'').trim();
-                    var rText = ce ? (ce.innerText||'').trim() : ft;
-                                if (r && rText.length > 10) return JSON.stringify({stage:'responding', response: r});
-                                return JSON.stringify({stage:'loading'});
-                            })()""")
-                            if isinstance(recheck, str):
-                                try: recheck = json.loads(recheck)
+                                        f"z.ai 执行中... ({len(current_text)} 字)")
                                 except: pass
-                            if isinstance(recheck, dict):
-                                rtext = recheck.get("response", "")
-                                if rtext and rtext != current_text:
-                                    # Check if new content is a usage limit error
-                                    if is_usage_limit_error(rtext):
-                                        log(profile_id, f"usage limit detected in fallback! ({len(rtext)} chars): {rtext[:60]}")
-                                        bypass_ok = await zai_bypass_usage_limit(
-                                            session, agent_base, profile_id, core, from_id, content)
-                                        if bypass_ok:
-                                            log(profile_id, "bypass succeeded, re-sending original message")
-                                            ok2, _ = await zai_type_and_send(
-                                                session, agent_base, profile_id, content, core, from_id)
-                                            if ok2:
-                                                last_sent_text = ""
-                                                stable_count = 0
-                                                continue
-                                        else:
-                                            if core and from_id:
-                                                await core.send_stream_chunk(from_id, "text",
-                                                    "❌ 用量限制，自动绕过失败，请稍后重试")
-                                                await core.send_stream_end(from_id)
-                                            break
-                                    # New non-limit content after 30s!
-                                    log(profile_id, f"new content after 30s! ({len(rtext)} chars, was {len(current_text)})")
-                                    if core and from_id:
-                                        try:
-                                            await core.send_stream_chunk(from_id, "text", rtext)
-                                        except: pass
-                                    last_sent_text = rtext
-                                    stable_count = 0
-                                    continue
-                        elif stable_count == 5:
-                            # 2nd fallback: wait 30s more, then re-check
-                            log(profile_id, f"stable {stable_count}, waiting 30s before re-check (2nd fallback)...")
-                            if core and from_id:
-                                try:
-                                    await core.send_stream_chunk(from_id, "thinking",
-                                        f"z.ai 执行中... 最后确认 ({len(current_text)} 字)")
-                                except: pass
-                            await asyncio.sleep(30)
-                            recheck = await zai_eval(session, agent_base, """(function(){
-                                var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
-                                var asst = [];
-                                for (var s = 0; s < sels.length; s++) {
-                                    var f = document.querySelectorAll(sels[s]);
-                                    for (var i = 0; i < f.length; i++) asst.push(f[i]);
-                                }
-                                var seen = {};
-                                asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
-            // Exclude user messages (z.ai uses class "chat-user")
-            asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
-                                if (asst.length === 0) return JSON.stringify({stage:'waiting'});
-                                var last = asst[asst.length-1];
-                                var ft = (last.innerText || '').trim();
-                                // If last element itself has 'prose' class, use its innerText directly
-            // (z.ai's chat-assistant has class "chat-assistant ... markdown-prose")
-            var lastClass = (last.className||'').toString();
-            var ce = null;
-            if (lastClass.indexOf('prose') < 0 && lastClass.indexOf('markdown') < 0) {
-                ce = last.querySelector('[class*="prose"],[class*="markdown"],[class*="content"]');
-            }
-                                if (!ce) { var ds = last.querySelectorAll('div');
-                                    for (var i=ds.length-1;i>=0;i--){var d=ds[i];var c=(d.className||'').toString();
-                                    if(!/thinking|reasoning|action|toolCallTrace/i.test(c)&&d.innerText.trim().length>50){ce=d;break;}}}
-                                // Use innerHTML to preserve formatting (markdown/HTML).
-                    // aicq.me renders messages with marked.js which supports HTML.
-                    var r = ce ? (ce.innerHTML||'').trim() : (last.innerHTML||'').trim();
-                    var rText = ce ? (ce.innerText||'').trim() : ft;
-                                if (r && rText.length > 10) return JSON.stringify({stage:'responding', response: r});
-                                return JSON.stringify({stage:'loading'});
-                            })()""")
-                            if isinstance(recheck, str):
-                                try: recheck = json.loads(recheck)
-                                except: pass
-                            if isinstance(recheck, dict):
-                                rtext = recheck.get("response", "")
-                                if rtext and rtext != current_text:
-                                    if is_usage_limit_error(rtext):
-                                        log(profile_id, f"usage limit in 2nd fallback! ({len(rtext)} chars)")
-                                        bypass_ok = await zai_bypass_usage_limit(
-                                            session, agent_base, profile_id, core, from_id, content)
-                                        if bypass_ok:
-                                            ok2, _ = await zai_type_and_send(
-                                                session, agent_base, profile_id, content, core, from_id)
-                                            if ok2:
-                                                last_sent_text = ""
-                                                stable_count = 0
-                                                continue
-                                        else:
-                                            if core and from_id:
-                                                await core.send_stream_chunk(from_id, "text",
-                                                    "❌ 用量限制，自动绕过失败，请稍后重试")
-                                                await core.send_stream_end(from_id)
-                                            break
-                                    log(profile_id, f"new content after 2nd 30s! ({len(rtext)} chars)")
-                                    if core and from_id:
-                                        try:
-                                            await core.send_stream_chunk(from_id, "text", rtext)
-                                        except: pass
-                                    last_sent_text = rtext
-                                    stable_count = 0
-                                    continue
+
                         # Normal stable (1-3): show status
                         if core and from_id:
                             try:
@@ -2168,7 +2030,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                         except Exception:
                             pass
 
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)
             else:
                 # Max polls reached (1 hour) — try one final eval, then send whatever we have
                 log(profile_id, f"max polls reached after 1h, doing final eval...")
