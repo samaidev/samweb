@@ -116,6 +116,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/cdp-dom-text", s.handleCDPDOMText)
         mux.HandleFunc("/agent/sse-enable", s.handleSSEEnable)
         mux.HandleFunc("/agent/sse-messages", s.handleSSEMessages)
+        // Fetch domain capture (works when z.ai JS thread is blocked)
+        mux.HandleFunc("/agent/fetch-enable", s.handleFetchEnable)
+        mux.HandleFunc("/agent/fetch-disable", s.handleFetchDisable)
+        mux.HandleFunc("/agent/fetch-chunks", s.handleFetchChunks)
+        mux.HandleFunc("/agent/fetch-poll", s.handleFetchPoll)
+        mux.HandleFunc("/agent/fetch-finish", s.handleFetchFinish)
+        mux.HandleFunc("/agent/fetch-paused", s.handleFetchPaused)
         mux.HandleFunc("/agent/wait", s.handleWait)
         mux.HandleFunc("/agent/elements", s.handleElements)
         mux.HandleFunc("/agent/element", s.handleElement)
@@ -757,6 +764,95 @@ func (s *Server) handleSSEMessages(w http.ResponseWriter, r *http.Request) {
                 return
         }
         writeJSON(w, http.StatusOK, msgs)
+}
+
+// --- Fetch domain capture handlers (work when z.ai JS thread is blocked) ---
+
+// handleFetchEnable starts intercepting streaming response bodies via the
+// CDP Fetch domain. Captured chunks work even when z.ai's JS thread is
+// fully blocked during a long Agent task.
+//
+// POST /agent/fetch-enable {"filter":"chat.z.ai/api/"}
+// If filter is empty, all responses are intercepted.
+func (s *Server) handleFetchEnable(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        var body struct {
+                Filter string `json:"filter"`
+        }
+        _ = json.NewDecoder(r.Body).Decode(&body)
+        if err := s.backend.EnableFetchCapture(ctx, body.Filter); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleFetchDisable stops intercepting and resumes all paused requests.
+// POST /agent/fetch-disable
+func (s *Server) handleFetchDisable(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        if err := s.backend.DisableFetchCapture(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleFetchChunks returns new response body chunks since last call.
+// GET /agent/fetch-chunks → [{"requestId":"...","url":"...","chunk":"...","offset":0,"timestamp":123}]
+func (s *Server) handleFetchChunks(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        chunks, err := s.backend.GetFetchChunks(ctx)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, chunks)
+}
+
+// handleFetchPoll triggers a snapshot of all in-flight paused requests.
+// Call this just before /agent/fetch-chunks to ensure the chunks buffer
+// is up-to-date.
+// POST /agent/fetch-poll
+func (s *Server) handleFetchPoll(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := s.backend.PollFetchBodies(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleFetchFinish resumes all paused requests so the page receives
+// the responses. Call this when the bridge is done capturing (e.g.
+// after the z.ai task completes or after a max timeout).
+// POST /agent/fetch-finish
+func (s *Server) handleFetchFinish(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        if err := s.backend.FinishAllFetchRequests(ctx); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
+}
+
+// handleFetchPaused returns the request IDs of all currently-paused
+// Fetch requests (for diagnostics).
+// GET /agent/fetch-paused → ["requestId1","requestId2"]
+func (s *Server) handleFetchPaused(w http.ResponseWriter, r *http.Request) {
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        ids, err := s.backend.GetPausedRequestIDs(ctx)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, ids)
 }
 
 // handleBreakthrough automatically detects and bypasses slider captchas.

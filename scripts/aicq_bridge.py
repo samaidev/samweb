@@ -117,6 +117,203 @@ async def zai_eval(session, agent_base, script, timeout=10):
         return None
 
 
+# ---------- Fetch domain capture helpers (work when JS thread is blocked) ----------
+#
+# z.ai Agent mode streams output via fetch streaming. When z.ai's JS thread
+# is blocked during a long task (1h+), neither Runtime.evaluate nor DOM
+# domain can read the page. The CDP Fetch domain, however, intercepts
+# HTTP responses at the network layer (CDP WebSocket) — completely
+# independent of the page's JS thread. This is the ONLY reliable way to
+# get incremental output during long Agent tasks.
+
+FETCH_FILTER = "chat.z.ai"  # broad filter; narrows to z.ai API calls
+
+
+async def fetch_enable(session, agent_base, filter_str=None):
+    """Enable Fetch domain interception. After this, all responses whose
+    URL contains `filter_str` are paused and their bodies can be read
+    incrementally via fetch_poll_and_get_chunks().
+    """
+    f = filter_str if filter_str is not None else FETCH_FILTER
+    try:
+        resp = await session.post(f"{agent_base}/agent/fetch-enable",
+                                  json={"filter": f},
+                                  timeout=aiohttp.ClientTimeout(total=15))
+        data = await resp.json()
+        return data.get("ok", False)
+    except Exception as e:
+        log("?", f"fetch_enable error: {e}")
+        return False
+
+
+async def fetch_disable(session, agent_base):
+    """Disable Fetch interception and resume all paused requests."""
+    try:
+        await session.post(f"{agent_base}/agent/fetch-disable",
+                           json={},
+                           timeout=aiohttp.ClientTimeout(total=15))
+    except Exception:
+        pass
+
+
+async def fetch_finish(session, agent_base):
+    """Resume all paused requests so the page receives the responses.
+    Call this when done capturing (e.g. after task completes)."""
+    try:
+        await session.post(f"{agent_base}/agent/fetch-finish",
+                           json={},
+                           timeout=aiohttp.ClientTimeout(total=15))
+    except Exception:
+        pass
+
+
+async def fetch_poll_and_get_chunks(session, agent_base):
+    """Poll all in-flight paused requests for new body bytes, then return
+    any new chunks. Each chunk is a dict with: requestId, url, chunk,
+    offset, timestamp.
+
+    Returns a list of new chunks (may be empty).
+    """
+    try:
+        # First, trigger a snapshot of all paused requests
+        await session.post(f"{agent_base}/agent/fetch-poll",
+                           json={},
+                           timeout=aiohttp.ClientTimeout(total=10))
+        # Then retrieve the new chunks (this clears the buffer)
+        resp = await session.get(f"{agent_base}/agent/fetch-chunks",
+                                 timeout=aiohttp.ClientTimeout(total=10))
+        data = await resp.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log("?", f"fetch_poll error: {e}")
+        return []
+
+
+async def fetch_get_paused_ids(session, agent_base):
+    """Get the request IDs of all currently-paused Fetch requests."""
+    try:
+        resp = await session.get(f"{agent_base}/agent/fetch-paused",
+                                 timeout=aiohttp.ClientTimeout(total=10))
+        data = await resp.json()
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def parse_fetch_chunks_for_text(chunks):
+    """Parse Fetch chunks (raw HTTP response body pieces from z.ai's
+    streaming API) and extract the assistant's text content.
+
+    z.ai's streaming format is likely one of:
+      - SSE: `data: {...json...}\n\n`
+      - JSON-lines: `{...json...}\n{...json...}\n`
+      - Plain text chunks
+
+    We try multiple parse strategies and return whatever text we can
+    extract. Returns (full_text, debug_info).
+    """
+    if not chunks:
+        return "", {}
+
+    # Concatenate all chunks (they may be partial — a single SSE event
+    # could be split across multiple chunks).
+    raw = "".join(c.get("chunk", "") for c in chunks)
+    if not raw:
+        return "", {}
+
+    debug = {"raw_len": len(raw), "raw_head": raw[:200]}
+
+    # Strategy 1: SSE format — split on "data:" prefixes
+    # Each SSE event is `data: <payload>\n\n` (or `data: <payload>\n`)
+    sse_texts = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if line.startswith("data:"):
+            payload = line[5:].strip()
+            if payload == "[DONE]" or not payload:
+                continue
+            # Try to parse as JSON
+            try:
+                obj = json.loads(payload)
+                text = _extract_text_from_zai_obj(obj)
+                if text:
+                    sse_texts.append(text)
+            except json.JSONDecodeError:
+                # Not JSON — treat as plain text
+                if payload and len(payload) > 1:
+                    sse_texts.append(payload)
+
+    if sse_texts:
+        debug["strategy"] = "sse"
+        debug["event_count"] = len(sse_texts)
+        return "".join(sse_texts), debug
+
+    # Strategy 2: JSON-lines — each line is a JSON object
+    jl_texts = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+            text = _extract_text_from_zai_obj(obj)
+            if text:
+                jl_texts.append(text)
+        except json.JSONDecodeError:
+            continue
+
+    if jl_texts:
+        debug["strategy"] = "json-lines"
+        debug["event_count"] = len(jl_texts)
+        return "".join(jl_texts), debug
+
+    # Strategy 3: Plain text — just return the raw chunk
+    debug["strategy"] = "raw"
+    return raw, debug
+
+
+def _extract_text_from_zai_obj(obj):
+    """Recursively extract text content from a z.ai streaming JSON object.
+    Looks for common field names: content, text, delta, message, answer,
+    response, output, chunk.
+    """
+    if not isinstance(obj, dict):
+        return ""
+    # Direct fields (most common)
+    for key in ("content", "text", "delta", "answer", "response", "output", "chunk"):
+        v = obj.get(key)
+        if isinstance(v, str) and v:
+            return v
+        if isinstance(v, dict):
+            t = _extract_text_from_zai_obj(v)
+            if t:
+                return t
+    # Nested under "message" (OpenAI-style)
+    msg = obj.get("message")
+    if isinstance(msg, dict):
+        for key in ("content", "text", "delta"):
+            v = msg.get(key)
+            if isinstance(v, str) and v:
+                return v
+        # OpenAI delta format: choices[0].delta.content
+        choices = msg.get("choices")
+        if isinstance(choices, list) and choices:
+            delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+            if isinstance(delta, dict):
+                v = delta.get("content")
+                if isinstance(v, str) and v:
+                    return v
+    # z.ai-specific: choices[0].delta.content at top level
+    choices = obj.get("choices")
+    if isinstance(choices, list) and choices:
+        delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+        if isinstance(delta, dict):
+            v = delta.get("content")
+            if isinstance(v, str) and v:
+                return v
+    return ""
+
+
 async def zai_switch_to_agent_mode(session, agent_base, profile_id):
     """Switch z.ai from Chat mode to Agent mode."""
     log(profile_id, "switching to Agent mode...")
@@ -1093,20 +1290,22 @@ async def run_bridge(profile_id, agent_port, db_path):
                 except: pre_count = 0
             log(profile_id, f"assistant messages before send: {pre_count}")
 
-            # Enable SSE capture BEFORE sending — z.ai streams output via
-            # SSE/WebSocket. CDP Network events bypass JS thread entirely,
-            # so they work even when z.ai is executing long tasks (1h+).
-            try:
-                await session.post(f"{agent_base}/agent/sse-enable",
-                    json={}, timeout=aiohttp.ClientTimeout(total=10))
-                log(profile_id, "SSE capture enabled")
-            except Exception as e:
-                log(profile_id, f"warning: SSE enable failed: {e}")
+            # Enable Fetch capture BEFORE sending — z.ai Agent mode streams
+            # output via fetch streaming. When z.ai's JS thread is blocked
+            # during a long task (1h+), the Fetch domain is the ONLY way
+            # to capture incremental output — Fetch.requestPaused events
+            # arrive via CDP WebSocket, NOT the page's JS event loop.
+            fetch_ok = await fetch_enable(session, agent_base)
+            if fetch_ok:
+                log(profile_id, f"Fetch capture enabled (filter={FETCH_FILTER})")
+            else:
+                log(profile_id, "warning: Fetch enable failed — falling back to eval")
 
             # Stream z.ai's response to AICQ in real-time.
-            # Use SSE messages as primary source (bypasses JS thread),
-            # fall back to eval/DOM when SSE has no data.
+            # PRIMARY: Fetch chunks (work when JS blocked)
+            # FALLBACK: eval/DOM (works for short tasks only)
             last_sent_text = ""
+            fetch_text_buffer = ""  # accumulated text from Fetch chunks
             stable_count = 0
             max_polls = 720  # 720 polls × 5s = 1 hour (long tasks may run 1h+)
 
@@ -1117,7 +1316,39 @@ async def run_bridge(profile_id, agent_port, db_path):
                     pass
 
             for poll in range(max_polls):
-                # Step 1: Check SSE messages first (bypasses JS thread)
+                # Step 1: Check Fetch chunks FIRST — works even when z.ai's
+                # JS thread is fully blocked during a long Agent task.
+                # Fetch.requestPaused events arrive via CDP WebSocket,
+                # completely independent of the page's JS event loop.
+                if fetch_ok:
+                    try:
+                        new_chunks = await fetch_poll_and_get_chunks(session, agent_base)
+                        if new_chunks:
+                            # Parse the chunks to extract assistant text
+                            new_text, parse_debug = parse_fetch_chunks_for_text(new_chunks)
+                            if new_text:
+                                fetch_text_buffer += new_text
+                                log(profile_id,
+                                    f"Fetch chunk: +{len(new_text)} chars "
+                                    f"(strategy={parse_debug.get('strategy','?')}, "
+                                    f"raw_len={parse_debug.get('raw_len',0)}, "
+                                    f"buffer={len(fetch_text_buffer)} chars)")
+                                # Send the accumulated text as a stream chunk
+                                if fetch_text_buffer != last_sent_text:
+                                    if core and from_id:
+                                        try:
+                                            await core.send_stream_chunk(from_id, "text", fetch_text_buffer)
+                                        except: pass
+                                    last_sent_text = fetch_text_buffer
+                                    stable_count = 0
+                                    # Don't sleep too long — keep capturing chunks
+                                    await asyncio.sleep(3)
+                                    continue
+                    except Exception as e:
+                        log(profile_id, f"Fetch poll error: {e}")
+
+                # Step 1b: Also check SSE messages (legacy — z.ai may use
+                # SSE for some endpoints). Bypasses JS thread.
                 try:
                     sse_resp = await session.get(f"{agent_base}/agent/sse-messages",
                         timeout=aiohttp.ClientTimeout(total=10))
@@ -1560,6 +1791,12 @@ async def run_bridge(profile_id, agent_port, db_path):
                     except Exception:
                         pass
     finally:
+        # Disable Fetch capture and resume any paused requests so the
+        # z.ai page can finish loading its responses.
+        try:
+            await fetch_disable(session, agent_base)
+        except Exception:
+            pass
         await session.close()
 
 

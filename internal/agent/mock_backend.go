@@ -288,6 +288,30 @@ func (m *MockBackend) GetSSEMessages(ctx context.Context) ([]SSEMessage, error) 
         return nil, fmt.Errorf("GetSSEMessages not supported on mock backend")
 }
 
+func (m *MockBackend) EnableFetchCapture(ctx context.Context, urlFilter string) error {
+        return fmt.Errorf("EnableFetchCapture not supported on mock backend")
+}
+
+func (m *MockBackend) DisableFetchCapture(ctx context.Context) error {
+        return nil
+}
+
+func (m *MockBackend) GetFetchChunks(ctx context.Context) ([]FetchChunk, error) {
+        return nil, nil
+}
+
+func (m *MockBackend) PollFetchBodies(ctx context.Context) error {
+        return nil
+}
+
+func (m *MockBackend) FinishAllFetchRequests(ctx context.Context) error {
+        return nil
+}
+
+func (m *MockBackend) GetPausedRequestIDs(ctx context.Context) ([]string, error) {
+        return nil, nil
+}
+
 func (m *MockBackend) SpawnTab(ctx context.Context, profileID, url string) (TabWorkerInfo, error) {
         return TabWorkerInfo{}, fmt.Errorf("SpawnTab not supported on mock backend")
 }

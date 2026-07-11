@@ -684,6 +684,82 @@ func (b *WailsBackend) GetSSEMessages(ctx context.Context) ([]agent.SSEMessage, 
         return out, nil
 }
 
+// --- Fetch domain capture (works when JS thread is blocked) ---
+
+func (b *WailsBackend) EnableFetchCapture(ctx context.Context, urlFilter string) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+        return c.EnableFetchCapture(urlFilter)
+}
+
+func (b *WailsBackend) DisableFetchCapture(ctx context.Context) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+        c.DisableFetchCapture()
+        return nil
+}
+
+func (b *WailsBackend) GetFetchChunks(ctx context.Context) ([]agent.FetchChunk, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil, fmt.Errorf("CDP client not connected")
+        }
+        chunks := c.GetFetchChunks()
+        out := make([]agent.FetchChunk, len(chunks))
+        for i, ch := range chunks {
+                out[i] = agent.FetchChunk{
+                        RequestID: ch.RequestID,
+                        URL:       ch.URL,
+                        Chunk:     ch.Chunk,
+                        Offset:    ch.Offset,
+                        Timestamp: ch.Timestamp,
+                }
+        }
+        return out, nil
+}
+
+func (b *WailsBackend) PollFetchBodies(ctx context.Context) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+        c.PollFetchBodies()
+        return nil
+}
+
+func (b *WailsBackend) FinishAllFetchRequests(ctx context.Context) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+        c.FinishAllFetchRequests()
+        return nil
+}
+
+func (b *WailsBackend) GetPausedRequestIDs(ctx context.Context) ([]string, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil, fmt.Errorf("CDP client not connected")
+        }
+        return c.GetPausedRequestIDs(), nil
+}
+
 func (b *WailsBackend) Wait(ctx context.Context, selector string, timeoutMs int) error {
         return b.dispatchVoid(ctx, "wait", map[string]interface{}{
                 "selector":  selector,

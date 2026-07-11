@@ -51,10 +51,34 @@ type Client struct {
         // streaming API calls in real-time. Unlike Runtime.evaluate
         // (which needs JS thread), Fetch.requestPaused events arrive
         // via CDP WebSocket and work even when JS is blocked.
-        fetchMu       sync.Mutex
-        fetchEnabled  bool
-        fetchChunks   []string // accumulated response chunks
-        fetchRequestID string  // current intercepted request ID
+        //
+        // When a streaming response is paused, we call Fetch.getResponseBody
+        // (which returns whatever has accumulated so far) AND let the request
+        // continue. As long as the request is still streaming, successive
+        // requestPaused events / takeResponseBodyAsStream calls let us read
+        // incremental chunks. We also rely on Network.loadingFinished to
+        // grab the final body when streaming completes.
+        fetchMu        sync.Mutex
+        fetchEnabled   bool
+        fetchChunks    []FetchChunk // accumulated response chunks
+        // fetchPaused tracks each paused request: requestId -> last byte offset read.
+        fetchPaused    map[string]int64
+        // fetchURLs maps requestId to the request URL (for logging / chunk metadata).
+        fetchURLs      map[string]string
+        fetchFilter    string // URL substring filter (only intercept matching requests)
+}
+
+// FetchChunk is a single incremental chunk of a streaming response body
+// captured via the Fetch domain. Chunks arrive via CDP WebSocket — they
+// do not require the page's JS thread, so they work even when z.ai's JS
+// is fully blocked during long Agent tasks.
+type FetchChunk struct {
+        RequestID string `json:"requestId"`
+        URL       string `json:"url"`
+        Chunk     string `json:"chunk"`       // text content (decoded)
+        Offset    int64  `json:"offset"`      // byte offset of this chunk
+        Timestamp float64 `json:"timestamp"`
+        Final     bool   `json:"final"`       // true if this is the last chunk
 }
 
 // SSEMessage is a single Server-Sent Event message captured from the
@@ -837,11 +861,307 @@ func (c *Client) handleEvent(method string, params json.RawMessage) {
                         }
                 }
                 c.sseMu.Unlock()
+
+        case "Fetch.requestPaused":
+                // Fetch domain event: a network request was paused and is
+                // waiting for us to either continue or abort. This event
+                // arrives via CDP WebSocket, NOT the page's JS thread, so
+                // it works even when z.ai's JS is fully blocked during a
+                // long Agent task.
+                c.handleFetchPaused(params)
         }
 }
 
-// fetchResponseBody calls Network.getResponseBody for a finished request
-// and stores the result in the captured request entry.
+// handleFetchPaused processes a Fetch.requestPaused event. We:
+//  1. Record the paused request (URL + request ID) so the bridge can
+//     poll it for incremental body chunks.
+//  2. DO NOT call Fetch.continueResponse yet — we keep the request
+//     paused so we can poll Fetch.getResponseBody for streaming chunks.
+//
+// This works because: when z.ai's JS thread is blocked during a long
+// Agent task, z.ai can't process the response anyway. Keeping the
+// response paused doesn't make the user-visible behavior any worse.
+// Meanwhile, we can read incremental chunks via Fetch.getResponseBody
+// (which works on paused requests and returns whatever the server has
+// streamed so far).
+//
+// The bridge calls FinishFetchRequest (→ Fetch.continueResponse) when
+// it detects the stream is done, OR after a max timeout.
+func (c *Client) handleFetchPaused(params json.RawMessage) {
+        c.fetchMu.Lock()
+        if !c.fetchEnabled {
+                c.fetchMu.Unlock()
+                return
+        }
+        c.fetchMu.Unlock()
+
+        var ev struct {
+                RequestID     string  `json:"requestId"`
+                Request       struct {
+                        URL    string `json:"url"`
+                        Method string `json:"method"`
+                } `json:"request"`
+                ResourceType string  `json:"resourceType"`
+                ResponseStatusCode int `json:"responseStatusCode"`
+                ResponseHeaders    []struct {
+                        Name  string `json:"name"`
+                        Value string `json:"value"`
+                } `json:"responseHeaders"`
+                Timestamp float64 `json:"timestamp"`
+        }
+        if err := json.Unmarshal(params, &ev); err != nil {
+                return
+        }
+
+        // Filter: only intercept requests matching our URL substring filter.
+        // (e.g. "chat.z.ai/api/" — skip images, scripts, fonts, etc.)
+        c.fetchMu.Lock()
+        filter := c.fetchFilter
+        c.fetchMu.Unlock()
+        if filter != "" && !strings.Contains(ev.Request.URL, filter) {
+                // Not interesting — let it pass without interception.
+                go c.continueFetchRequest(ev.RequestID)
+                return
+        }
+
+        // Record the paused request. The bridge will poll it for
+        // incremental body chunks via PollFetchBodies → snapshotFetchBody.
+        c.fetchMu.Lock()
+        if c.fetchPaused == nil {
+                c.fetchPaused = map[string]int64{}
+        }
+        c.fetchPaused[ev.RequestID] = 0
+        // Also remember the URL so we can include it in chunks.
+        if c.fetchURLs == nil {
+                c.fetchURLs = map[string]string{}
+        }
+        c.fetchURLs[ev.RequestID] = ev.Request.URL
+        c.fetchMu.Unlock()
+
+        log.Printf("[cdp] Fetch.requestPaused: %s %s (paused, waiting for body chunks)",
+                ev.Request.Method, ev.Request.URL)
+}
+
+// snapshotFetchBody calls Fetch.getResponseBody on a paused request and
+// records the result as a FetchChunk. This is the ONLY way to read a
+// streaming response body while the JS thread is blocked — Fetch domain
+// events arrive via the CDP WebSocket, not the page's JS event loop.
+//
+// Works on PAUSED requests only (between Fetch.requestPaused and
+// Fetch.continueResponse). Returns the body accumulated so far; we
+// compute the delta vs. the last snapshot and store only the new bytes.
+func (c *Client) snapshotFetchBody(requestID, url string, ts float64) {
+        resp, err := c.send("Fetch.getResponseBody", map[string]interface{}{
+                "requestId": requestID,
+        })
+        if err != nil {
+                return
+        }
+        var result struct {
+                Body          string `json:"body"`
+                Base64Encoded bool   `json:"base64Encoded"`
+        }
+        if err := json.Unmarshal(resp, &result); err != nil {
+                return
+        }
+        body := result.Body
+        if result.Base64Encoded {
+                dec, err := base64.StdEncoding.DecodeString(body)
+                if err == nil {
+                        body = string(dec)
+                }
+        }
+        if body == "" {
+                return
+        }
+        c.fetchMu.Lock()
+        defer c.fetchMu.Unlock()
+        if !c.fetchEnabled {
+                return
+        }
+        // Look up URL from map if not provided.
+        if url == "" {
+                url = c.fetchURLs[requestID]
+        }
+        prev := c.fetchPaused[requestID]
+        if int64(len(body)) <= prev {
+                // No new bytes since last snapshot.
+                return
+        }
+        // Only store the new bytes.
+        chunk := body[prev:]
+        c.fetchPaused[requestID] = int64(len(body))
+        c.fetchChunks = append(c.fetchChunks, FetchChunk{
+                RequestID: requestID,
+                URL:       url,
+                Chunk:     chunk,
+                Offset:    prev,
+                Timestamp: ts,
+        })
+}
+
+// continueFetchRequest resumes a paused request so the page receives the
+// response. Called by FinishFetchRequest (bridge-driven) when the stream
+// is done or after a max timeout.
+func (c *Client) continueFetchRequest(requestID string) {
+        _, _ = c.send("Fetch.continueResponse", map[string]interface{}{
+                "requestId": requestID,
+        })
+        c.fetchMu.Lock()
+        delete(c.fetchPaused, requestID)
+        delete(c.fetchURLs, requestID)
+        c.fetchMu.Unlock()
+}
+
+// FinishFetchRequest resumes a paused request (calls Fetch.continueResponse)
+// and removes it from the polling set. The bridge calls this when it
+// detects the stream is done or after a max timeout.
+func (c *Client) FinishFetchRequest(requestID string) {
+        c.continueFetchRequest(requestID)
+}
+
+// FinishAllFetchRequests resumes ALL currently-paused requests. The bridge
+// calls this on shutdown or when cancelling a task.
+func (c *Client) FinishAllFetchRequests() {
+        c.fetchMu.Lock()
+        ids := make([]string, 0, len(c.fetchPaused))
+        for id := range c.fetchPaused {
+                ids = append(ids, id)
+        }
+        c.fetchMu.Unlock()
+        for _, id := range ids {
+                c.continueFetchRequest(id)
+        }
+}
+
+// EnableFetchCapture enables the Fetch domain and starts intercepting
+// network requests whose URL contains the filter substring. Captured
+// streaming response chunks are stored and returned by GetFetchChunks.
+//
+// Key property: Fetch.requestPaused events arrive via the CDP WebSocket,
+// NOT via the page's JS event loop. This means we can capture streaming
+// response bodies (like z.ai's Agent mode output) even when z.ai's JS
+// thread is fully blocked during a long task execution.
+//
+// The filter should match z.ai's chat/agent API endpoint, e.g.
+// "chat.z.ai/api/" or "/api/chat" — this avoids intercepting images,
+// scripts, fonts, etc.
+//
+// IMPORTANT: paused requests are NOT auto-continued. The bridge MUST
+// call FinishFetchRequest(requestId) or FinishAllFetchRequests() when
+// done, otherwise the page's fetch promise stays pending forever.
+// EnableFetchCapture also auto-resumes any leftover paused requests
+// from a previous capture session, so it's safe to call repeatedly.
+func (c *Client) EnableFetchCapture(urlFilter string) error {
+        // First, resume any leftover paused requests from a previous
+        // capture session. This prevents resource leaks (paused requests
+        // would otherwise stay paused forever at the CDP level).
+        c.FinishAllFetchRequests()
+
+        c.fetchMu.Lock()
+        c.fetchEnabled = true
+        c.fetchChunks = nil
+        c.fetchPaused = map[string]int64{}
+        c.fetchURLs = map[string]string{}
+        c.fetchFilter = urlFilter
+        c.fetchMu.Unlock()
+
+        // Build a URL-pattern filter. CDP Fetch.enable accepts a list of
+        // URL patterns to intercept. We use urlMatch with the substring
+        // (matches any URL containing it) at the Response stage.
+        params := map[string]interface{}{
+                "patterns": []map[string]interface{}{
+                        {
+                                "requestStage": "Response",
+                        },
+                },
+        }
+        if urlFilter != "" {
+                params["patterns"] = []map[string]interface{}{
+                        {
+                                "urlMatch":     urlFilter,
+                                "requestStage": "Response",
+                        },
+                }
+        }
+        _, err := c.send("Fetch.enable", params)
+        if err != nil {
+                return fmt.Errorf("Fetch.enable: %w", err)
+        }
+        log.Printf("[cdp] Fetch.enable: filter=%q", urlFilter)
+        return nil
+}
+
+// DisableFetchCapture stops intercepting network requests and resumes
+// any currently-paused requests.
+func (c *Client) DisableFetchCapture() {
+        c.fetchMu.Lock()
+        c.fetchEnabled = false
+        ids := make([]string, 0, len(c.fetchPaused))
+        for id := range c.fetchPaused {
+                ids = append(ids, id)
+        }
+        c.fetchMu.Unlock()
+        for _, id := range ids {
+                _, _ = c.send("Fetch.continueResponse", map[string]interface{}{
+                        "requestId": id,
+                })
+        }
+        _, _ = c.send("Fetch.disable", nil)
+        log.Printf("[cdp] Fetch.disable: resumed %d paused requests", len(ids))
+}
+
+// GetFetchChunks returns all captured Fetch chunks since the last call
+// and clears the buffer. Each call returns only NEW chunks.
+func (c *Client) GetFetchChunks() []FetchChunk {
+        c.fetchMu.Lock()
+        defer c.fetchMu.Unlock()
+        out := c.fetchChunks
+        c.fetchChunks = nil
+        return out
+}
+
+// GetPausedRequestIDs returns the request IDs of all currently-paused
+// Fetch requests. The bridge uses this to know which requests to finish
+// when the task completes.
+func (c *Client) GetPausedRequestIDs() []string {
+        c.fetchMu.Lock()
+        defer c.fetchMu.Unlock()
+        out := make([]string, 0, len(c.fetchPaused))
+        for id := range c.fetchPaused {
+                out = append(out, id)
+        }
+        return out
+}
+
+// PollFetchBodies re-snapshots all in-flight paused/streaming requests
+// and records any new chunks collected. This is the key method to call
+// during long z.ai Agent tasks — it works even when z.ai's JS thread
+// is fully blocked, because all I/O is via CDP WebSocket.
+//
+// Each call issues Fetch.getResponseBody for every currently-paused
+// request, computes the delta vs. the last snapshot, and appends new
+// bytes to c.fetchChunks. The bridge then calls GetFetchChunks to
+// retrieve and clear the buffer.
+func (c *Client) PollFetchBodies() {
+        c.fetchMu.Lock()
+        if !c.fetchEnabled {
+                c.fetchMu.Unlock()
+                return
+        }
+        ids := make([]string, 0, len(c.fetchPaused))
+        for id := range c.fetchPaused {
+                ids = append(ids, id)
+        }
+        c.fetchMu.Unlock()
+        ts := float64(time.Now().UnixNano()) / 1e9
+        for _, id := range ids {
+                // Synchronous (not goroutine) so we don't spam Fetch.getResponseBody
+                // and so the chunks are ordered. Each call is fast (just reads
+                // the buffered body, no network I/O).
+                c.snapshotFetchBody(id, "", ts)
+        }
+}
 func (c *Client) fetchResponseBody(requestID string) {
         resp, err := c.send("Network.getResponseBody", map[string]interface{}{
                 "requestId": requestID,

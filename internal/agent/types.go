@@ -243,17 +243,31 @@ type ProfileInfo struct {
 
 // TabWorkerInfo describes a running tab worker process.
 type TabWorkerInfo struct {
-	ProfileID  string `json:"profile_id"`
-	ProfileName string `json:"profile_name"`
-	URL        string `json:"url"`
-	AgentPort  int    `json:"agent_port"`
-	CDPPort    int    `json:"cdp_port"`
-	PID        int    `json:"pid"`
+        ProfileID  string `json:"profile_id"`
+        ProfileName string `json:"profile_name"`
+        URL        string `json:"url"`
+        AgentPort  int    `json:"agent_port"`
+        CDPPort    int    `json:"cdp_port"`
+        PID        int    `json:"pid"`
 }
 
 // SSEMessage is a single SSE/WebSocket message captured from z.ai's
 // network stream. Used for real-time output when JS thread is blocked.
 type SSEMessage struct {
-	Data      string  `json:"data"`
-	Timestamp float64 `json:"timestamp"`
+        Data      string  `json:"data"`
+        Timestamp float64 `json:"timestamp"`
+}
+
+// FetchChunk is a single incremental chunk of a streaming response body
+// captured via the CDP Fetch domain. Unlike SSE messages (which only
+// fire for EventSource/WebSocket), Fetch captures ALL HTTP responses —
+// including fetch streaming (the most common way z.ai streams Agent
+// output). Chunks arrive via CDP WebSocket, so they work even when
+// z.ai's JS thread is fully blocked during a long task.
+type FetchChunk struct {
+        RequestID string  `json:"requestId"`
+        URL       string  `json:"url"`
+        Chunk     string  `json:"chunk"`
+        Offset    int64   `json:"offset"`
+        Timestamp float64 `json:"timestamp"`
 }

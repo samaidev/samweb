@@ -92,6 +92,30 @@ type Backend interface {
         // These CDP events bypass JS thread entirely.
         EnableSSECapture(ctx context.Context) error
         GetSSEMessages(ctx context.Context) ([]SSEMessage, error)
+
+        // Fetch capture: z.ai Agent mode streams output via fetch streaming.
+        // The Fetch domain intercepts these responses at the network layer
+        // (CDP WebSocket) — works even when z.ai's JS thread is fully
+        // blocked during a long task execution. This is the ONLY reliable
+        // way to get incremental output during long Agent tasks.
+        //
+        // EnableFetchCapture starts intercepting responses whose URL
+        // contains urlFilter. Paused requests are NOT auto-continued —
+        // the bridge MUST call FinishAllFetchRequests when done.
+        EnableFetchCapture(ctx context.Context, urlFilter string) error
+        DisableFetchCapture(ctx context.Context) error
+        // GetFetchChunks returns new response body chunks since last call.
+        GetFetchChunks(ctx context.Context) ([]FetchChunk, error)
+        // PollFetchBodies snapshots all in-flight paused requests and
+        // records any new bytes. Called by the bridge between
+        // GetFetchChunks calls to ensure chunks are up-to-date.
+        PollFetchBodies(ctx context.Context) error
+        // FinishAllFetchRequests resumes all paused requests so the page
+        // receives the responses. Called when the bridge is done capturing.
+        FinishAllFetchRequests(ctx context.Context) error
+        // GetPausedRequestIDs returns the request IDs of all currently
+        // paused Fetch requests (for diagnostics).
+        GetPausedRequestIDs(ctx context.Context) ([]string, error)
         Wait(ctx context.Context, selector string, timeoutMs int) error
         Elements(ctx context.Context, selector string) ([]Element, error)
         Element(ctx context.Context, selector string) (*Element, error)
