@@ -1469,6 +1469,8 @@ async def run_bridge(profile_id, agent_port, db_path):
                     # Read last assistant message via CDP DOM domain
                     # (bypasses JS thread — works even when z.ai is busy).
                     log(profile_id, f"auto-stream poll {refresh_cycle+1}/720...")
+                    if refresh_cycle == 0:
+                        auto_stream_state = type('obj', (object,), {'no_content_count': 0})()
                     result = ""
                     try:
                         dom_result = await zai_read_response_via_dom(
@@ -1508,6 +1510,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 log(profile_id, f"auto-stream complete ({len(result)} chars)")
                                 if core:
                                     try:
+                                        await core.send_stream_chunk("1000008", "thinking", "")
                                         await core.send_stream_end("1000008",
                                             text_segments=[result] if result else None,
                                             content_order=["text"] if result else None)
@@ -1525,16 +1528,44 @@ async def run_bridge(profile_id, agent_port, db_path):
                             except: pass
                         log(profile_id, f"auto-stream: no content read (cycle {refresh_cycle+1})")
 
+                    # If we've had no content for 3 consecutive cycles AND
+                    # we already sent some text, the response is done —
+                    # call stream_end and exit. This prevents the auto-stream
+                    # from blocking the message queue forever.
+                    if not result and last_sent_text:
+                        no_content_count = getattr(auto_stream_state, 'no_content_count', 0) + 1
+                        auto_stream_state.no_content_count = no_content_count
+                        if no_content_count >= 3:
+                            log(profile_id, f"auto-stream: no content for 3 cycles, finishing")
+                            if core:
+                                try:
+                                    await core.send_stream_chunk("1000008", "thinking", "")
+                                    await core.send_stream_end("1000008",
+                                        text_segments=[last_sent_text] if last_sent_text else None,
+                                        content_order=["text"] if last_sent_text else None)
+                                except: pass
+                            break
+                    else:
+                        auto_stream_state.no_content_count = 0
+
                     # Wait before next refresh cycle
                     await asyncio.sleep(30)  # 10s load + 15s eval + 30s wait = ~55s per cycle
 
                 # auto-stream loop done
                 if last_sent_text:
                     if core:
-                        try: await core.send_stream_end("1000008")
+                        try:
+                            await core.send_stream_chunk("1000008", "thinking", "")
+                            await core.send_stream_end("1000008")
                         except: pass
                     log(profile_id, f"auto-stream finished (sent {len(last_sent_text)} chars)")
                 else:
+                    # No output captured — clear thinking and end stream
+                    if core:
+                        try:
+                            await core.send_stream_chunk("1000008", "thinking", "")
+                            await core.send_stream_end("1000008")
+                        except: pass
                     log(profile_id, "auto-stream: no output captured")
             else:
                 log(profile_id, "z.ai is idle, waiting for messages")
@@ -2117,6 +2148,9 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 log(profile_id, f"response complete ({len(current_text)} chars, stable {stable_count} polls)")
                                 if core and from_id:
                                     try:
+                                        # Clear the "thinking" status bar BEFORE stream_end
+                                        # so aicq.me doesn't show "z.ai 执行中..." forever
+                                        await core.send_stream_chunk(from_id, "thinking", "")
                                         # Pass text_segments so the server can reconstruct
                                         # the message even if stream_chunks were lost during
                                         # WS reconnect. This ensures the message is persisted
