@@ -133,7 +133,7 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
 
     Returns a dict {stage, response} similar to the eval-based check:
       - {stage:'responding', response: '<html>...'} — response found
-      - {stage:'waiting'} — no new assistant messages
+      - {stage:'waiting'} — no new assistant messages (or empty/loading)
       - {stage:'error', error: '...'} — error message detected
     """
     # Try multiple selectors for the assistant message container.
@@ -147,14 +147,32 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
     ]
     for sel in selectors:
         html = await zai_dom_text_last(session, agent_base, sel, timeout=timeout)
-        if html and len(html) > 20:
-            # Check for error messages
-            if any(err in html for err in ['回复内容为空', '请稍后重试', '限制沙箱',
-                                             '当前模型使用人数较多', '用量已超出',
-                                             '超出个人限制', 'Sandbox limit']):
-                return {"stage": "error", "error": html[:200]}
-            # Return the HTML as the response
-            return {"stage": "responding", "response": html}
+        if not html or len(html) < 20:
+            continue
+
+        # Extract visible text content from the HTML to check if the
+        # response is actually present (not just an empty container).
+        # z.ai uses Svelte and may have empty <div class="markdown-prose">
+        # containers while the response is being rendered.
+        import re as _re
+        # Remove HTML tags to get visible text
+        text_content = _re.sub(r'<[^>]+>', '', html).strip()
+        # Remove Svelte template markers (<!---->)
+        text_content = _re.sub(r'<!--.*?-->', '', text_content).strip()
+
+        if len(text_content) < 5:
+            # Empty or loading response — skip this selector, try next
+            continue
+
+        # Check for error messages in the TEXT content (not the HTML,
+        # to avoid false positives from class names/attributes)
+        if any(err in text_content for err in ['回复内容为空', '请稍后重试', '限制沙箱',
+                                                '当前模型使用人数较多', '用量已超出',
+                                                '超出个人限制', 'Sandbox limit']):
+            return {"stage": "error", "error": text_content[:200]}
+
+        # Return the HTML as the response
+        return {"stage": "responding", "response": html}
     return {"stage": "waiting"}
 
 
@@ -2004,7 +2022,15 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 log(profile_id, f"response complete ({len(current_text)} chars, stable {stable_count} polls)")
                                 if core and from_id:
                                     try:
-                                        await core.send_stream_end(from_id)
+                                        # Pass text_segments so the server can reconstruct
+                                        # the message even if stream_chunks were lost during
+                                        # WS reconnect. This ensures the message is persisted
+                                        # for multi-device sync (10-message rolling history).
+                                        await core.send_stream_end(
+                                            from_id,
+                                            text_segments=[current_text] if current_text else None,
+                                            content_order=["text"] if current_text else None,
+                                        )
                                         log(profile_id, f"response streamed to {from_id}")
                                     except Exception as e:
                                         log(profile_id, f"stream_end error: {e}")
@@ -2069,7 +2095,11 @@ async def run_bridge(profile_id, agent_port, db_path):
                     try:
                         if last_sent_text:
                             await core.send_stream_chunk(from_id, "text", last_sent_text)
-                        await core.send_stream_end(from_id)
+                        await core.send_stream_end(
+                            from_id,
+                            text_segments=[last_sent_text] if last_sent_text else None,
+                            content_order=["text"] if last_sent_text else None,
+                        )
                     except Exception:
                         pass
     finally:
