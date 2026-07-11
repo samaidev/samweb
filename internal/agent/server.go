@@ -40,7 +40,7 @@ func NewServer(addr string, token string, backend Backend) *Server {
                 Addr:         addr,
                 Handler:      s.authMiddleware(mux),
                 ReadTimeout:  30 * time.Second,
-                WriteTimeout: 120 * time.Second,
+                WriteTimeout: 600 * time.Second,
         }
         return s
 }
@@ -694,7 +694,7 @@ func (s *Server) handleCDPEval(w http.ResponseWriter, r *http.Request) {
                 writeError(w, http.StatusBadRequest, "script is required")
                 return
         }
-        ctx, cancel := ctxWithTimeout(r.Context(), 30*time.Second)
+        ctx, cancel := ctxWithTimeout(r.Context(), 300*time.Second)
         defer cancel()
         val, err := s.backend.CDPEval(ctx, opts.Script)
         if err != nil {

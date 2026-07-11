@@ -93,7 +93,7 @@ async def zai_dom_text(session, agent_base, selector, timeout=15):
         return ""
 
 
-async def zai_eval(session, agent_base, script, timeout=120):
+async def zai_eval(session, agent_base, script, timeout=300):
     """Run a JS eval on the tab worker's z.ai page via CDP Runtime.evaluate.
     Uses /agent/cdp-eval (not /agent/eval) because tab workers don't have
     the samweb UI bootstrap JS injected, so the dispatch-based eval times out.
@@ -1105,7 +1105,7 @@ async def run_bridge(profile_id, agent_port, db_path):
             # polls (9 seconds of stability).
             last_sent_text = ""
             stable_count = 0
-            max_polls = 100  # 100 × 3s = 5 min max
+            max_polls = 60  # 60 polls (each may take up to 5 min if z.ai JS is blocked)
 
             if core and from_id:
                 try:
