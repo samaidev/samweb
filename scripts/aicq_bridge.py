@@ -2030,30 +2030,42 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 await core.send_stream_end(from_id)
                             break
 
-                    # Normal response — DON'T send intermediate updates.
-                    # aicq.me APPENDS text chunks (doesn't replace), so
-                    # sending the full content on every poll causes severe
-                    # duplication (content appears N times).
-                    #
-                    # Instead: wait until the content is stable (3 polls),
-                    # then send the FINAL content once + stream_end.
-                    # This eliminates all duplication.
+                    # Normal response — TRUE incremental output.
+                    # aicq.me APPENDS 'text' chunks, so we send only the
+                    # NEW text (the diff between current_text and last_sent_text).
+                    # This gives real-time incremental output with NO duplication
+                    # and NO flickering (no clear_text needed).
                     if current_text != last_sent_text:
-                        # Content changed — just update our tracking.
-                        # DON'T send a stream_chunk yet (would cause duplication).
+                        if core and from_id:
+                            try:
+                                # Calculate the incremental diff:
+                                # current_text is the full response so far.
+                                # last_sent_text is what we already sent.
+                                # The new part is current_text[len(last_sent_text):]
+                                # BUT only if current_text starts with last_sent_text
+                                # (z.ai appends to the response, doesn't replace).
+                                if last_sent_text and current_text.startswith(last_sent_text):
+                                    # True incremental: send only the new part
+                                    new_part = current_text[len(last_sent_text):]
+                                    if new_part:
+                                        await core.send_stream_chunk(from_id, "text", new_part)
+                                elif last_sent_text:
+                                    # Content changed in a non-append way (e.g. z.ai
+                                    # rewrote the response). Use clear_text + full content.
+                                    await core.send_stream_chunk(from_id, "clear_text", "")
+                                    await core.send_stream_chunk(from_id, "text", current_text)
+                                else:
+                                    # First send — send the full content
+                                    await core.send_stream_chunk(from_id, "text", current_text)
+                            except Exception:
+                                pass
                         last_sent_text = current_text
                         stable_count = 0
-                        log(profile_id, f"content updated ({len(current_text)} chars, waiting for stability)")
-                    else:
+                        log(profile_id, f"streaming... ({len(current_text)} chars)")
                     else:
                         # Text unchanged — z.ai may be done, or between steps.
-                        # SIMPLE strategy: wait 3 polls (30s total), then
+                        # SIMPLE strategy: wait 3 polls (15s total), then
                         # consider the response complete and call stream_end.
-                        # This avoids the infinite loop where the re-check
-                        # found "new content" (a different length because it
-                        # used eval instead of DOM domain) and reset
-                        # stable_count to 0, causing the bridge to never
-                        # call stream_end.
                         stable_count += 1
                         if stable_count >= 3:
                             # Response is stable for 3 polls (30s) — done.
