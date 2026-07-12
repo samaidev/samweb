@@ -1476,6 +1476,173 @@ async def connect_aicq(db_path, profile_id):
 
 # ---------- Main bridge ----------
 
+async def process_group_message(session, agent_base, profile_id, core,
+                               group_message_queue, group_last_msg_ts, chat_map):
+    """Process a group message: send to z.ai, get response, send back to group.
+
+    Flow:
+    1. Get message from queue
+    2. Send to z.ai with prefix "来自{group_name}群 {sender_name}({from_id})：{content}"
+    3. Wait for z.ai response
+    4. Fetch any NEW group messages that arrived during z.ai processing
+    5. If new messages, send them to z.ai too (loop back to step 2)
+    6. When no more new messages, send z.ai's final response to the group
+    """
+    msg = await group_message_queue.get()
+    group_id = msg["group_id"]
+    from_id = msg["from_id"]
+    content = msg["content"]
+    sender_name = msg.get("sender_name", "")
+    group_name = msg.get("group_name", "")
+
+    # Build prefixed message for z.ai
+    sender_display = f"{sender_name}({from_id})" if sender_name else from_id
+    group_display = f"{group_name}群" if group_name else f"群{group_id[:8]}"
+    prefixed_content = f"来自{group_display} {sender_display}：{content}"
+
+    log(profile_id, f"sending group message to z.ai: {prefixed_content[:80]}...")
+
+    # Send to z.ai (same flow as private message)
+    # Wait for chat input ready
+    for attempt in range(30):
+        html = await zai_dom_text(session, agent_base, '#chat-input', timeout=5)
+        if html and len(html) > 10:
+            break
+        await asyncio.sleep(2)
+    else:
+        log(profile_id, "chat input not found for group message, skipping")
+        return
+
+    # Type + send
+    ok, _ = await zai_type_and_send(session, agent_base, profile_id, prefixed_content, core, from_id)
+    if not ok:
+        log(profile_id, f"failed to send group message to z.ai: {_}")
+        return
+
+    # Record pre_count + pre_last_hash
+    pre_count_htmls = await zai_dom_text_all(session, agent_base,
+        '[class*="chat-assistant"]', timeout=10)
+    pre_count = len(pre_count_htmls) if pre_count_htmls else 0
+    import hashlib
+    pre_last_hash = ""
+    if pre_count_htmls:
+        import re as _re
+        pre_last_text = _re.sub(r'<[^>]+>', '', pre_count_htmls[-1]).strip()[:500]
+        pre_last_hash = hashlib.md5(pre_last_text.encode()).hexdigest()
+    log(profile_id, f"group msg: pre_count={pre_count} last_hash={pre_last_hash[:8]}")
+
+    # Wait for z.ai response
+    last_sent_text = ""
+    stable_count = 0
+    max_polls = 720
+    for poll in range(max_polls):
+        # Anti-freeze every 30s
+        if poll > 0 and poll % 6 == 0:
+            try:
+                await zai_eval(session, agent_base, """(function(){
+                    var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
+                    if (chatBtns.length > 0) { chatBtns[0].click(); return "clicked"; }
+                    return "no_chat";
+                })()""", timeout=5)
+            except: pass
+
+        result = await zai_read_response_via_dom(
+            session, agent_base, pre_count=pre_count, timeout=15,
+            pre_last_hash=pre_last_hash)
+        if isinstance(result, dict) and result.get("stage") == "responding":
+            current_text = result.get("response", "")
+            if current_text and current_text != last_sent_text:
+                last_sent_text = current_text
+                stable_count = 0
+                log(profile_id, f"group response streaming... ({len(current_text)} chars)")
+            else:
+                stable_count += 1
+                if stable_count >= 3:
+                    log(profile_id, f"group response complete ({len(last_sent_text)} chars)")
+                    break
+        elif isinstance(result, dict) and result.get("stage") == "error":
+            last_sent_text = f"Error: {result.get('error', '')}"
+            break
+        await asyncio.sleep(5)
+
+    if not last_sent_text:
+        log(profile_id, "group response: no output from z.ai")
+        return
+
+    # Before sending response to group, check for new group messages
+    # that arrived during z.ai processing. If any, send them to z.ai too.
+    while not group_message_queue.empty():
+        new_msg = await group_message_queue.get()
+        new_group_id = new_msg["group_id"]
+        new_from_id = new_msg["from_id"]
+        new_content = new_msg["content"]
+        new_sender = new_msg.get("sender_name", "")
+        new_group_name = new_msg.get("group_name", "")
+
+        # Append to the response text as context for z.ai
+        new_sender_display = f"{new_sender}({new_from_id})" if new_sender else new_from_id
+        new_group_display = f"{new_group_name}群" if new_group_name else f"群{new_group_id[:8]}"
+        new_prefixed = f"\n\n--- 新消息 ---\n来自{new_group_display} {new_sender_display}：{new_content}"
+
+        log(profile_id, f"sending new group message to z.ai: {new_prefixed[:80]}...")
+
+        # Send to z.ai
+        ok2, _ = await zai_type_and_send(session, agent_base, profile_id, new_prefixed, core, new_from_id)
+        if not ok2:
+            continue
+
+        # Update pre_count for the new message
+        pre_count_htmls2 = await zai_dom_text_all(session, agent_base,
+            '[class*="chat-assistant"]', timeout=10)
+        pre_count2 = len(pre_count_htmls2) if pre_count_htmls2 else 0
+        pre_last_hash2 = ""
+        if pre_count_htmls2:
+            import re as _re2
+            pre_last_text2 = _re2.sub(r'<[^>]+>', '', pre_count_htmls2[-1]).strip()[:500]
+            pre_last_hash2 = hashlib.md5(pre_last_text2.encode()).hexdigest()
+
+        # Wait for z.ai response to the new message
+        new_response = ""
+        stable_count2 = 0
+        for poll2 in range(720):
+            if poll2 > 0 and poll2 % 6 == 0:
+                try:
+                    await zai_eval(session, agent_base, """(function(){
+                        var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
+                        if (chatBtns.length > 0) { chatBtns[0].click(); return "clicked"; }
+                        return "no_chat";
+                    })()""", timeout=5)
+                except: pass
+
+            result2 = await zai_read_response_via_dom(
+                session, agent_base, pre_count=pre_count2, timeout=15,
+                pre_last_hash=pre_last_hash2)
+            if isinstance(result2, dict) and result2.get("stage") == "responding":
+                current2 = result2.get("response", "")
+                if current2 and current2 != new_response:
+                    new_response = current2
+                    stable_count2 = 0
+                else:
+                    stable_count2 += 1
+                    if stable_count2 >= 3:
+                        break
+            elif isinstance(result2, dict) and result2.get("stage") == "error":
+                new_response = f"Error: {result2.get('error', '')}"
+                break
+            await asyncio.sleep(5)
+
+        if new_response:
+            last_sent_text += f"\n\n{new_response}"
+
+    # Send the final response to the group
+    log(profile_id, f"sending group response to AICQ group {group_id}: {last_sent_text[:80]}...")
+    try:
+        await core.send_group_message(group_id, last_sent_text)
+        log(profile_id, f"group response sent to {group_id}")
+    except Exception as e:
+        log(profile_id, f"failed to send group message: {e}")
+
+
 async def run_bridge(profile_id, agent_port, db_path):
     agent_base = f"http://127.0.0.1:{agent_port}"
     log(profile_id, f"starting bridge: agent_port={agent_port} db={db_path}")
@@ -1505,6 +1672,12 @@ async def run_bridge(profile_id, agent_port, db_path):
 
         # Step 3: Set up message queue + handler
         message_queue = asyncio.Queue()
+        # Group message queue — separate from private chat
+        group_message_queue = asyncio.Queue()
+        # Track last processed group message timestamp per group (for fetching new messages)
+        group_last_msg_ts = {}
+        # Track processed group message IDs for dedup
+        _processed_group_msg_ids = set()
         # Map: AICQ friend_id → z.ai chat_id (for context retention).
         # Default behavior: subsequent messages from the same friend
         # continue in the same z.ai chat. "/new" creates a fresh chat.
@@ -1729,7 +1902,90 @@ async def run_bridge(profile_id, agent_port, db_path):
         except Exception as e:
             log(profile_id, f"on_message registration warning: {e}")
 
-        log(profile_id, "bridge ready, waiting for AICQ messages...")
+        # Group message callback — receives messages from AICQ groups
+        async def on_group_message(msg):
+            try:
+                msg_keys = list(msg.keys()) if isinstance(msg, dict) else []
+                log(profile_id, f"on_group_message keys: {msg_keys}")
+                if isinstance(msg, dict):
+                    for k in msg_keys:
+                        if k not in ('content', 'data', 'from', 'from_id'):
+                            v = msg.get(k)
+                            if v is not None and v != "":
+                                log(profile_id, f"  grp_msg.{k} = {str(v)[:200]}")
+
+                # Field extraction: top-level camelCase → data snake_case → data camelCase
+                group_id = msg.get("groupId") or msg.get("group_id") or ""
+                from_id = msg.get("from") or msg.get("fromId") or msg.get("from_id") or ""
+                content_raw = msg.get("content") or ""
+                msg_type = msg.get("msgType") or msg.get("msg_type") or "text"
+                sender_name = msg.get("senderName") or msg.get("sender_name") or ""
+                group_name = msg.get("groupName") or msg.get("group_name") or ""
+
+                # Try data wrapper for fields not at top level
+                data_wrapper = msg.get("data", {})
+                if isinstance(data_wrapper, dict):
+                    if not group_id:
+                        group_id = data_wrapper.get("group_id") or data_wrapper.get("groupId") or ""
+                    if not from_id:
+                        from_id = data_wrapper.get("from_id") or data_wrapper.get("fromId") or ""
+                    if not content_raw:
+                        content_raw = data_wrapper.get("content") or ""
+                    if not sender_name:
+                        sender_name = data_wrapper.get("sender_name") or data_wrapper.get("senderName") or ""
+                    if not group_name:
+                        group_name = data_wrapper.get("group_name") or data_wrapper.get("groupName") or ""
+
+                # Skip system messages
+                if msg_type == "system":
+                    log(profile_id, f"skipping system group message")
+                    return
+
+                # Skip own messages (prevent infinite loop)
+                agent = core._agent or core.db.get_agent()
+                if agent and from_id == agent.get("account_id", ""):
+                    log(profile_id, f"skipping own group message")
+                    return
+
+                # Dedup: check msg_id
+                msg_id = msg.get("id") or msg.get("messageId") or ""
+                if msg_id:
+                    if msg_id in _processed_group_msg_ids:
+                        log(profile_id, f"skipping duplicate group message id={msg_id}")
+                        return
+                    _processed_group_msg_ids.add(msg_id)
+                    # Cap at 1000, trim to 500
+                    if len(_processed_group_msg_ids) > 1000:
+                        _processed_group_msg_ids = set(list(_processed_group_msg_ids)[-500:])
+
+                # Fallback dedup: (group_id, from_id, content[:200], 10s window)
+                import time as _time
+                dedup_key = f"{group_id}|{from_id}|{content_raw[:200]}"
+                # (Simple dedup — msg_id primary is enough for most cases)
+
+                clean = re.sub(r'<[^>]+>', '', content_raw).strip()
+                if not clean:
+                    return
+
+                log(profile_id, f"group message from {from_id} in group {group_id}: {clean[:80]}...")
+                await group_message_queue.put({
+                    "group_id": group_id,
+                    "from_id": from_id,
+                    "content": clean,
+                    "sender_name": sender_name,
+                    "group_name": group_name,
+                    "msg_type": msg_type,
+                })
+            except Exception as e:
+                log(profile_id, f"on_group_message error: {e}")
+
+        try:
+            core.on_group_message(on_group_message)
+            log(profile_id, "group message callback registered")
+        except Exception as e:
+            log(profile_id, f"on_group_message registration warning: {e}")
+
+        log(profile_id, "bridge ready, waiting for AICQ messages (private + group)...")
 
         # Step 4: Message loop (serial — processes one message at a time,
         # new messages queue up while z.ai is responding)
@@ -1737,7 +1993,7 @@ async def run_bridge(profile_id, agent_port, db_path):
             try:
                 msg = await asyncio.wait_for(message_queue.get(), timeout=60)
             except asyncio.TimeoutError:
-                # Periodic health check
+                # Periodic health check + group message check
                 try:
                     async with session.get(f"{agent_base}/agent/health",
                                            timeout=aiohttp.ClientTimeout(total=5)) as resp:
@@ -1745,6 +2001,12 @@ async def run_bridge(profile_id, agent_port, db_path):
                             log(profile_id, "tab worker health check failed")
                 except Exception:
                     log(profile_id, "tab worker unreachable")
+
+                # Check for group messages (non-blocking)
+                if not group_message_queue.empty():
+                    log(profile_id, "processing group message...")
+                    await process_group_message(session, agent_base, profile_id,
+                        core, group_message_queue, group_last_msg_ts, chat_map)
                 continue
 
             from_id = msg["from"]
