@@ -1460,6 +1460,12 @@ async def run_bridge(profile_id, agent_port, db_path):
             
             if is_generating:
                 log(profile_id, "z.ai is still generating! Starting auto-stream...")
+                # Look up session binding to know where to send the response
+                auto_target_type, auto_target_id = get_session_target(profile_id, first_chat_id)
+                if not auto_target_type:
+                    auto_target_type = "private"
+                    auto_target_id = "1000008"
+                log(profile_id, f"auto-stream target: {auto_target_type} {auto_target_id}")
                 # Record pre_count (messages before the current generation)
                 pre_count = await zai_eval(session, agent_base, """(function(){
                     var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
