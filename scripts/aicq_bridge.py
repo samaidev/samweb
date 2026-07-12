@@ -1476,6 +1476,39 @@ async def connect_aicq(db_path, profile_id):
 
 # ---------- Main bridge ----------
 
+def get_session_binding(profile_id):
+    """Read session binding from file."""
+    import os, json
+    path = os.path.expanduser(f"~/.samweb/session_binding_{profile_id}.json")
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_session_binding(profile_id, bindings):
+    """Save session bindings to file."""
+    import os, json
+    path = os.path.expanduser(f"~/.samweb/session_binding_{profile_id}.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump(bindings, f, indent=2)
+
+def set_session_binding(profile_id, zai_chat_id, target_type, target_id):
+    """Record that z.ai chat_id's response should go to target_type (group/private)."""
+    bindings = get_session_binding(profile_id)
+    bindings[zai_chat_id] = {"type": target_type, "target_id": target_id}
+    save_session_binding(profile_id, bindings)
+
+def get_session_target(profile_id, zai_chat_id):
+    """Look up where to send the response for this z.ai chat_id."""
+    bindings = get_session_binding(profile_id)
+    b = bindings.get(zai_chat_id)
+    if b:
+        return b.get("type"), b.get("target_id")
+    return None, None
+
+
 async def process_group_message(session, agent_base, profile_id, core,
                                group_message_queue, group_last_msg_ts, chat_map):
     """Process a group message: send to z.ai, get response, send back to group.
@@ -1499,6 +1532,15 @@ async def process_group_message(session, agent_base, profile_id, core,
     sender_display = f"{sender_name}({from_id})" if sender_name else from_id
     group_display = f"{group_name}群" if group_name else f"群{group_id[:8]}"
     prefixed_content = f"来自{group_display} {sender_display}：{content}"
+
+    # Save session binding: this z.ai chat's response goes to the group
+    try:
+        cur_url = await zai_eval(session, agent_base, "window.location.href", timeout=5)
+        if isinstance(cur_url, str) and "/c/" in cur_url:
+            zai_cid = cur_url.split("/c/")[-1].split("/")[0].split("?")[0]
+            set_session_binding(profile_id, zai_cid, "group", group_id)
+            log(profile_id, f"session binding: zai_chat={zai_cid} -> group {group_id}")
+    except: pass
 
     log(profile_id, f"sending group message to z.ai: {prefixed_content[:80]}...")
 
@@ -2125,6 +2167,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                     log(profile_id, "zai_new_chat returned None, will try to send to current page anyway")
             else:
                 log(profile_id, f"continuing z.ai chat {chat_id} for {from_id}")
+                set_session_binding(profile_id, chat_id, "private", from_id)
                 # Navigate to the existing chat so z.ai's input box loads.
                 # Wait 10s for page load (z.ai Agent mode is slow to render).
                 await zai_eval(session, agent_base,
