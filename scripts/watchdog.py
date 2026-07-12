@@ -43,6 +43,7 @@ def main():
     while True:
         now = time.time()
         all_stuck = True
+        any_stuck = False
         any_running = False
         
         for name, path in BRIDGE_LOGS:
@@ -52,13 +53,17 @@ def main():
                 if age < STUCK_THRESHOLD:
                     all_stuck = False
                     any_running = True
+                else:
+                    any_stuck = True
+                    print(f"[{time.strftime('%H:%M:%S')}] {name}: STUCK ({int(age)}s since last log)")
                 # Log status every 5 checks
                 if int(now) % 300 == 0:
                     print(f"[{time.strftime('%H:%M:%S')}] {name}: last update {int(age)}s ago")
             # If log doesn't exist, bridge might not be running yet
         
-        # Only restart if ALL bridges are stuck AND we haven't restarted recently
-        if all_stuck and any_running and (now - last_restart) > RESTART_COOLDOWN:
+        # Restart if ANY bridge is stuck AND we haven't restarted recently
+        # (even one stuck bridge blocks the group message loop)
+        if any_stuck and any_running and (now - last_restart) > RESTART_COOLDOWN:
             # Double-check: maybe all bridges just haven't started yet
             time.sleep(10)  # wait 10s and recheck
             now2 = time.time()
@@ -68,7 +73,7 @@ def main():
                 if mtime > 0 and (now2 - mtime) < STUCK_THRESHOLD:
                     still_stuck = False
                     break
-            if still_stuck:
+            if True:  # any_stuck is enough, restart immediately
                 restart_samweb()
                 last_restart = now2
         
