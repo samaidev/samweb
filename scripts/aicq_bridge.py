@@ -141,88 +141,6 @@ async def zai_dom_text_all(session, agent_base, selector, timeout=15):
         return []
 
 
-def html_to_markdown(html):
-    """Convert z.ai's rendered HTML to markdown source.
-
-    AICQ renders markdown, not HTML. z.ai's DOM is rendered HTML
-    (h1, ul, li, code, etc). We convert back to markdown so AICQ
-    can render it with the same style as z.ai.
-
-    Supported conversions:
-    - <h1>-<h6> -> #, ##, ###, etc
-    - <ul><li> -> - item
-    - <ol><li> -> 1. item
-    - <input type="checkbox"> -> - [ ] or - [x]
-    - <strong>/<b> -> **text**
-    - <em>/<i> -> *text*
-    - <code> -> `text`
-    - <pre> -> ```code```
-    - <br> -> newline
-    - <p> -> text + newline
-    - <a href="url">text</a> -> [text](url)
-    """
-    import re as _re
-
-    # Remove Svelte template markers
-    md = _re.sub(r'<!--.*?-->', '', html, flags=_re.DOTALL)
-
-    # Remove SVG elements
-    md = _re.sub(r'<svg[^>]*>.*?</svg>', '', md, flags=_re.DOTALL)
-
-    # Remove button elements
-    md = _re.sub(r'<button[^>]*>.*?</button>', '', md, flags=_re.DOTALL)
-
-    # Convert checkboxes before list items
-    md = _re.sub(r'<input[^>]*type="checkbox"[^>]*checked[^>]*>', '[x] ', md, flags=_re.IGNORECASE)
-    md = _re.sub(r'<input[^>]*type="checkbox"[^>]*>', '[ ] ', md, flags=_re.IGNORECASE)
-
-    # Convert headings
-    for i in range(6, 0, -1):
-        md = _re.sub(f'<h{i}[^>]*>(.*?)</h{i}>', lambda m, lvl=i: '#' * lvl + ' ' + m.group(1).strip(), md, flags=_re.DOTALL | _re.IGNORECASE)
-
-    # Convert links
-    md = _re.sub(r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>', r'[]()', md, flags=_re.DOTALL | _re.IGNORECASE)
-
-    # Convert bold
-    md = _re.sub(r'<(strong|b)[^>]*>(.*?)</>', r'****', md, flags=_re.DOTALL | _re.IGNORECASE)
-
-    # Convert italic
-    md = _re.sub(r'<(em|i)[^>]*>(.*?)</>', r'**', md, flags=_re.DOTALL | _re.IGNORECASE)
-
-    # Convert inline code
-    md = _re.sub(r'<code[^>]*>(.*?)</code>', r'``', md, flags=_re.DOTALL | _re.IGNORECASE)
-
-    # Convert code blocks
-    md = _re.sub(r'<pre[^>]*>(.*?)</pre>', lambda m: '```\n' + _re.sub(r'<[^>]+>', '', m.group(1)).strip() + '\n```', md, flags=_re.DOTALL | _re.IGNORECASE)
-
-    # Convert list items
-    md = _re.sub(r'<li[^>]*>(.*?)</li>', lambda m: '- ' + m.group(1).strip() + '\n', md, flags=_re.DOTALL | _re.IGNORECASE)
-
-    # Remove ul/ol tags (keep li content)
-    md = _re.sub(r'</?(ul|ol)[^>]*>', '', md, flags=_re.IGNORECASE)
-
-    # Convert <br> to newline
-    md = _re.sub(r'<br\s*/?>', '\n', md, flags=_re.IGNORECASE)
-
-    # Convert <p> to text + double newline
-    md = _re.sub(r'<p[^>]*>(.*?)</p>', lambda m: m.group(1).strip() + '\n\n', md, flags=_re.DOTALL | _re.IGNORECASE)
-
-    # Convert <hr> to ---
-    md = _re.sub(r'<hr[^>]*/?>', '\n---\n', md, flags=_re.IGNORECASE)
-
-    # Remove all remaining HTML tags
-    md = _re.sub(r'<[^>]+>', '', md)
-
-    # Decode HTML entities
-    md = md.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
-
-    # Clean up whitespace
-    md = _re.sub(r'\n\s*\n\s*\n+', '\n\n', md)
-    md = md.strip()
-
-    return md
-
-
 def clean_zai_html(html):
     """Clean z.ai's Svelte-generated HTML into proper markdown/HTML
     that aicq.me can render correctly.
@@ -278,7 +196,7 @@ def clean_zai_html(html):
     return cleaned
 
 
-async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15, pre_last_hash=""):
+async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15):
     """Read z.ai's latest NEW assistant response via CDP DOM domain.
 
     CRITICAL FIX (2026-07-12): Now actually uses pre_count to only
@@ -299,29 +217,10 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
     all_html = await zai_dom_text_all(session, agent_base, '[class*="chat-assistant"]', timeout=timeout)
     if not all_html:
         return {"stage": "waiting"}
-    # Only consider NEW messages (index >= pre_count).
-    # If pre_count >= len(all_html), z.ai may have REPLACED the last message
-    # (instead of appending). Compare last message hash to detect replacement.
-    if pre_count > 0:
-        if pre_count >= len(all_html):
-            # No new message appended — check if last message CHANGED
-            if pre_last_hash and all_html:
-                import re as _re2
-                import hashlib
-                cur_last_text = _re2.sub(r'<[^>]+>', '', all_html[-1]).strip()[:500]
-                cur_last_hash = hashlib.md5(cur_last_text.encode()).hexdigest()
-                if cur_last_hash != pre_last_hash:
-                    # Last message changed — treat as new response
-                    new_htmls = [all_html[-1]]
-                else:
-                    return {"stage": "waiting"}
-            else:
-                return {"stage": "waiting"}
-        else:
-            new_htmls = all_html[pre_count:]
-    else:
-        new_htmls = all_html
+    # Only consider NEW messages (index >= pre_count)
+    new_htmls = all_html[pre_count:] if pre_count > 0 else all_html
     if not new_htmls:
+        # No new assistant messages yet — z.ai hasn't generated a response
         return {"stage": "waiting"}
     # Take the LAST new message (most recent response)
     html = new_htmls[-1]
@@ -336,8 +235,8 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
                                             '当前模型使用人数较多', '用量已超出',
                                             '超出个人限制', 'Sandbox limit']):
         return {"stage": "error", "error": text_content[:200]}
-    markdown = html_to_markdown(html)
-    return {"stage": "responding", "response": markdown}
+    cleaned_html = clean_zai_html(html)
+    return {"stage": "responding", "response": cleaned_html}
 
 
 async def zai_eval(session, agent_base, script, timeout=10):
@@ -1214,22 +1113,17 @@ async def zai_type_and_send(session, agent_base, profile_id, message, core=None,
     Handles high-traffic popups: if z.ai shows "高峰时段" popup after
     sending, clicks "取消", waits 20s, and retries. Up to 20 retries.
     """
-    # Wait for chat input — use CDP DOM domain (bypasses JS thread).
-    # z.ai's JS may be frozen after navigation, so zai_eval (Runtime.evaluate)
-    # times out. CDP DOM.querySelectorAll works even when JS is blocked.
-    input_selectors = ['#chat-input', 'textarea', '[contenteditable="true"]']
-    for attempt in range(30):  # 30 × 2s = 60s max
-        for sel in input_selectors:
-            html = await zai_dom_text(session, agent_base, sel, timeout=5)
-            if html and len(html) > 10:
-                log(profile_id, f"chat input found via {sel} (attempt {attempt+1})")
-                break
-        else:
-            await asyncio.sleep(2)
-            continue
-        break
+    # Wait for chat input
+    for attempt in range(10):
+        ready = await zai_eval(session, agent_base, """(function(){
+            var el = document.querySelector('#chat-input, textarea[class*="chat-input"], div[contenteditable="true"]');
+            return el ? 'ready' : 'not_found';
+        })()""")
+        if ready == "ready":
+            break
+        await asyncio.sleep(2)
     else:
-        return False, "chat input not found after 60s"
+        return False, "chat input not found"
 
     # Type the message
     await zai_eval(session, agent_base, f"""(function(){{
@@ -1476,215 +1370,6 @@ async def connect_aicq(db_path, profile_id):
 
 # ---------- Main bridge ----------
 
-def get_session_binding(profile_id):
-    """Read session binding from file."""
-    import os, json
-    path = os.path.expanduser(f"~/.samweb/session_binding_{profile_id}.json")
-    try:
-        with open(path, 'r') as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_session_binding(profile_id, bindings):
-    """Save session bindings to file."""
-    import os, json
-    path = os.path.expanduser(f"~/.samweb/session_binding_{profile_id}.json")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w') as f:
-        json.dump(bindings, f, indent=2)
-
-def set_session_binding(profile_id, zai_chat_id, target_type, target_id):
-    """Record that z.ai chat_id's response should go to target_type (group/private)."""
-    bindings = get_session_binding(profile_id)
-    bindings[zai_chat_id] = {"type": target_type, "target_id": target_id}
-    save_session_binding(profile_id, bindings)
-
-def get_session_target(profile_id, zai_chat_id):
-    """Look up where to send the response for this z.ai chat_id."""
-    bindings = get_session_binding(profile_id)
-    b = bindings.get(zai_chat_id)
-    if b:
-        return b.get("type"), b.get("target_id")
-    return None, None
-
-
-async def process_group_message(session, agent_base, profile_id, core,
-                               group_message_queue, group_last_msg_ts, chat_map):
-    """Process a group message: send to z.ai, get response, send back to group.
-
-    Flow:
-    1. Get message from queue
-    2. Send to z.ai with prefix "来自{group_name}群 {sender_name}({from_id})：{content}"
-    3. Wait for z.ai response
-    4. Fetch any NEW group messages that arrived during z.ai processing
-    5. If new messages, send them to z.ai too (loop back to step 2)
-    6. When no more new messages, send z.ai's final response to the group
-    """
-    msg = await group_message_queue.get()
-    group_id = msg["group_id"]
-    from_id = msg["from_id"]
-    content = msg["content"]
-    sender_name = msg.get("sender_name", "")
-    group_name = msg.get("group_name", "")
-
-    # Build prefixed message for z.ai
-    sender_display = f"{sender_name}({from_id})" if sender_name else from_id
-    group_display = f"{group_name}群" if group_name else f"群{group_id[:8]}"
-    prefixed_content = f"来自{group_display} {sender_display}：{content}"
-
-    # Save session binding: this z.ai chat's response goes to the group
-    try:
-        cur_url = await zai_eval(session, agent_base, "window.location.href", timeout=5)
-        if isinstance(cur_url, str) and "/c/" in cur_url:
-            zai_cid = cur_url.split("/c/")[-1].split("/")[0].split("?")[0]
-            set_session_binding(profile_id, zai_cid, "group", group_id)
-            log(profile_id, f"session binding: zai_chat={zai_cid} -> group {group_id}")
-    except: pass
-
-    log(profile_id, f"sending group message to z.ai: {prefixed_content[:80]}...")
-
-    # Send to z.ai (same flow as private message)
-    # Wait for chat input ready
-    for attempt in range(30):
-        html = await zai_dom_text(session, agent_base, '#chat-input', timeout=5)
-        if html and len(html) > 10:
-            break
-        await asyncio.sleep(2)
-    else:
-        log(profile_id, "chat input not found for group message, skipping")
-        return
-
-    # Type + send
-    ok, _ = await zai_type_and_send(session, agent_base, profile_id, prefixed_content, core, from_id)
-    if not ok:
-        log(profile_id, f"failed to send group message to z.ai: {_}")
-        return
-
-    # Record pre_count + pre_last_hash
-    pre_count_htmls = await zai_dom_text_all(session, agent_base,
-        '[class*="chat-assistant"]', timeout=10)
-    pre_count = len(pre_count_htmls) if pre_count_htmls else 0
-    import hashlib
-    pre_last_hash = ""
-    if pre_count_htmls:
-        import re as _re
-        pre_last_text = _re.sub(r'<[^>]+>', '', pre_count_htmls[-1]).strip()[:500]
-        pre_last_hash = hashlib.md5(pre_last_text.encode()).hexdigest()
-    log(profile_id, f"group msg: pre_count={pre_count} last_hash={pre_last_hash[:8]}")
-
-    # Wait for z.ai response
-    last_sent_text = ""
-    stable_count = 0
-    max_polls = 720
-    for poll in range(max_polls):
-        # Anti-freeze every 30s
-        if poll > 0 and poll % 6 == 0:
-            try:
-                await zai_eval(session, agent_base, """(function(){
-                    var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
-                    if (chatBtns.length > 0) { chatBtns[0].click(); return "clicked"; }
-                    return "no_chat";
-                })()""", timeout=5)
-            except: pass
-
-        result = await zai_read_response_via_dom(
-            session, agent_base, pre_count=pre_count, timeout=15,
-            pre_last_hash=pre_last_hash)
-        if isinstance(result, dict) and result.get("stage") == "responding":
-            current_text = result.get("response", "")
-            if current_text and current_text != last_sent_text:
-                last_sent_text = current_text
-                stable_count = 0
-                log(profile_id, f"group response streaming... ({len(current_text)} chars)")
-            else:
-                stable_count += 1
-                if stable_count >= 3:
-                    log(profile_id, f"group response complete ({len(last_sent_text)} chars)")
-                    break
-        elif isinstance(result, dict) and result.get("stage") == "error":
-            last_sent_text = f"Error: {result.get('error', '')}"
-            break
-        await asyncio.sleep(5)
-
-    if not last_sent_text:
-        log(profile_id, "group response: no output from z.ai")
-        return
-
-    # Before sending response to group, check for new group messages
-    # that arrived during z.ai processing. If any, send them to z.ai too.
-    while not group_message_queue.empty():
-        new_msg = await group_message_queue.get()
-        new_group_id = new_msg["group_id"]
-        new_from_id = new_msg["from_id"]
-        new_content = new_msg["content"]
-        new_sender = new_msg.get("sender_name", "")
-        new_group_name = new_msg.get("group_name", "")
-
-        # Append to the response text as context for z.ai
-        new_sender_display = f"{new_sender}({new_from_id})" if new_sender else new_from_id
-        new_group_display = f"{new_group_name}群" if new_group_name else f"群{new_group_id[:8]}"
-        new_prefixed = f"\n\n--- 新消息 ---\n来自{new_group_display} {new_sender_display}：{new_content}"
-
-        log(profile_id, f"sending new group message to z.ai: {new_prefixed[:80]}...")
-
-        # Send to z.ai
-        ok2, _ = await zai_type_and_send(session, agent_base, profile_id, new_prefixed, core, new_from_id)
-        if not ok2:
-            continue
-
-        # Update pre_count for the new message
-        pre_count_htmls2 = await zai_dom_text_all(session, agent_base,
-            '[class*="chat-assistant"]', timeout=10)
-        pre_count2 = len(pre_count_htmls2) if pre_count_htmls2 else 0
-        pre_last_hash2 = ""
-        if pre_count_htmls2:
-            import re as _re2
-            pre_last_text2 = _re2.sub(r'<[^>]+>', '', pre_count_htmls2[-1]).strip()[:500]
-            pre_last_hash2 = hashlib.md5(pre_last_text2.encode()).hexdigest()
-
-        # Wait for z.ai response to the new message
-        new_response = ""
-        stable_count2 = 0
-        for poll2 in range(720):
-            if poll2 > 0 and poll2 % 6 == 0:
-                try:
-                    await zai_eval(session, agent_base, """(function(){
-                        var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
-                        if (chatBtns.length > 0) { chatBtns[0].click(); return "clicked"; }
-                        return "no_chat";
-                    })()""", timeout=5)
-                except: pass
-
-            result2 = await zai_read_response_via_dom(
-                session, agent_base, pre_count=pre_count2, timeout=15,
-                pre_last_hash=pre_last_hash2)
-            if isinstance(result2, dict) and result2.get("stage") == "responding":
-                current2 = result2.get("response", "")
-                if current2 and current2 != new_response:
-                    new_response = current2
-                    stable_count2 = 0
-                else:
-                    stable_count2 += 1
-                    if stable_count2 >= 3:
-                        break
-            elif isinstance(result2, dict) and result2.get("stage") == "error":
-                new_response = f"Error: {result2.get('error', '')}"
-                break
-            await asyncio.sleep(5)
-
-        if new_response:
-            last_sent_text += f"\n\n{new_response}"
-
-    # Send the final response to the group
-    log(profile_id, f"sending group response to AICQ group {group_id}: {last_sent_text[:80]}...")
-    try:
-        await core.send_group_message(group_id, last_sent_text)
-        log(profile_id, f"group response sent to {group_id}")
-    except Exception as e:
-        log(profile_id, f"failed to send group message: {e}")
-
-
 async def run_bridge(profile_id, agent_port, db_path):
     agent_base = f"http://127.0.0.1:{agent_port}"
     log(profile_id, f"starting bridge: agent_port={agent_port} db={db_path}")
@@ -1714,12 +1399,6 @@ async def run_bridge(profile_id, agent_port, db_path):
 
         # Step 3: Set up message queue + handler
         message_queue = asyncio.Queue()
-        # Group message queue — separate from private chat
-        group_message_queue = asyncio.Queue()
-        # Track last processed group message timestamp per group (for fetching new messages)
-        group_last_msg_ts = {}
-        # Track processed group message IDs for dedup
-        _processed_group_msg_ids = set()
         # Map: AICQ friend_id → z.ai chat_id (for context retention).
         # Default behavior: subsequent messages from the same friend
         # continue in the same z.ai chat. "/new" creates a fresh chat.
@@ -1781,11 +1460,6 @@ async def run_bridge(profile_id, agent_port, db_path):
             
             if is_generating:
                 log(profile_id, "z.ai is still generating! Starting auto-stream...")
-                auto_target_type, auto_target_id = get_session_target(profile_id, first_chat_id)
-                if not auto_target_type:
-                    auto_target_type = "private"
-                    auto_target_id = "1000008"
-                log(profile_id, f"auto-stream target: {auto_target_type} {auto_target_id}")
                 # Record pre_count (messages before the current generation)
                 pre_count = await zai_eval(session, agent_base, """(function(){
                     var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
@@ -1859,11 +1533,18 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 log(profile_id, f"auto-stream complete ({len(result)} chars)")
                                 if core:
                                     try:
-                                        await core.send_stream_chunk(auto_target_id, "thinking", "")
-                                        await core.send_stream_end(auto_target_id,
-                                            text_segments=[result] if result else None,
-                                            content_order=["text"] if result else None)
-                                    except: pass
+                                        if auto_target_type == "group":
+                                            # Send to group via send_group_message (not stream)
+                                            await core.send_group_message(auto_target_id, result)
+                                            log(profile_id, f"auto-stream sent to group {auto_target_id} ({len(result)} chars)")
+                                        else:
+                                            # Private: use stream_chunk + stream_end
+                                            await core.send_stream_chunk(auto_target_id, "thinking", "")
+                                            await core.send_stream_end(auto_target_id,
+                                                text_segments=[result] if result else None,
+                                                content_order=["text"] if result else None)
+                                    except Exception as e:
+                                        log(profile_id, f"auto-stream send error: {e}")
                                 break
                             if core:
                                 try: await core.send_stream_chunk(auto_target_id, "thinking",
@@ -1909,11 +1590,14 @@ async def run_bridge(profile_id, agent_port, db_path):
                         except: pass
                     log(profile_id, f"auto-stream finished (sent {len(last_sent_text)} chars)")
                 else:
-                    # No output captured — clear thinking and end stream
+                    # No output captured
                     if core:
                         try:
-                            await core.send_stream_chunk(auto_target_id, "thinking", "")
-                            await core.send_stream_end(auto_target_id)
+                            if auto_target_type == "group":
+                                pass  # nothing to send to group
+                            else:
+                                await core.send_stream_chunk(auto_target_id, "thinking", "")
+                                await core.send_stream_end(auto_target_id)
                         except: pass
                     log(profile_id, "auto-stream: no output captured")
             else:
@@ -1949,90 +1633,7 @@ async def run_bridge(profile_id, agent_port, db_path):
         except Exception as e:
             log(profile_id, f"on_message registration warning: {e}")
 
-        # Group message callback — receives messages from AICQ groups
-        async def on_group_message(msg):
-            try:
-                msg_keys = list(msg.keys()) if isinstance(msg, dict) else []
-                log(profile_id, f"on_group_message keys: {msg_keys}")
-                if isinstance(msg, dict):
-                    for k in msg_keys:
-                        if k not in ('content', 'data', 'from', 'from_id'):
-                            v = msg.get(k)
-                            if v is not None and v != "":
-                                log(profile_id, f"  grp_msg.{k} = {str(v)[:200]}")
-
-                # Field extraction: top-level camelCase → data snake_case → data camelCase
-                group_id = msg.get("groupId") or msg.get("group_id") or ""
-                from_id = msg.get("from") or msg.get("fromId") or msg.get("from_id") or ""
-                content_raw = msg.get("content") or ""
-                msg_type = msg.get("msgType") or msg.get("msg_type") or "text"
-                sender_name = msg.get("senderName") or msg.get("sender_name") or ""
-                group_name = msg.get("groupName") or msg.get("group_name") or ""
-
-                # Try data wrapper for fields not at top level
-                data_wrapper = msg.get("data", {})
-                if isinstance(data_wrapper, dict):
-                    if not group_id:
-                        group_id = data_wrapper.get("group_id") or data_wrapper.get("groupId") or ""
-                    if not from_id:
-                        from_id = data_wrapper.get("from_id") or data_wrapper.get("fromId") or ""
-                    if not content_raw:
-                        content_raw = data_wrapper.get("content") or ""
-                    if not sender_name:
-                        sender_name = data_wrapper.get("sender_name") or data_wrapper.get("senderName") or ""
-                    if not group_name:
-                        group_name = data_wrapper.get("group_name") or data_wrapper.get("groupName") or ""
-
-                # Skip system messages
-                if msg_type == "system":
-                    log(profile_id, f"skipping system group message")
-                    return
-
-                # Skip own messages (prevent infinite loop)
-                agent = core._agent or core.db.get_agent()
-                if agent and from_id == agent.get("account_id", ""):
-                    log(profile_id, f"skipping own group message")
-                    return
-
-                # Dedup: check msg_id
-                msg_id = msg.get("id") or msg.get("messageId") or ""
-                if msg_id:
-                    if msg_id in _processed_group_msg_ids:
-                        log(profile_id, f"skipping duplicate group message id={msg_id}")
-                        return
-                    _processed_group_msg_ids.add(msg_id)
-                    # Cap at 1000, trim to 500
-                    if len(_processed_group_msg_ids) > 1000:
-                        _processed_group_msg_ids = set(list(_processed_group_msg_ids)[-500:])
-
-                # Fallback dedup: (group_id, from_id, content[:200], 10s window)
-                import time as _time
-                dedup_key = f"{group_id}|{from_id}|{content_raw[:200]}"
-                # (Simple dedup — msg_id primary is enough for most cases)
-
-                clean = re.sub(r'<[^>]+>', '', content_raw).strip()
-                if not clean:
-                    return
-
-                log(profile_id, f"group message from {from_id} in group {group_id}: {clean[:80]}...")
-                await group_message_queue.put({
-                    "group_id": group_id,
-                    "from_id": from_id,
-                    "content": clean,
-                    "sender_name": sender_name,
-                    "group_name": group_name,
-                    "msg_type": msg_type,
-                })
-            except Exception as e:
-                log(profile_id, f"on_group_message error: {e}")
-
-        try:
-            core.on_group_message(on_group_message)
-            log(profile_id, "group message callback registered")
-        except Exception as e:
-            log(profile_id, f"on_group_message registration warning: {e}")
-
-        log(profile_id, "bridge ready, waiting for AICQ messages (private + group)...")
+        log(profile_id, "bridge ready, waiting for AICQ messages...")
 
         # Step 4: Message loop (serial — processes one message at a time,
         # new messages queue up while z.ai is responding)
@@ -2040,7 +1641,7 @@ async def run_bridge(profile_id, agent_port, db_path):
             try:
                 msg = await asyncio.wait_for(message_queue.get(), timeout=60)
             except asyncio.TimeoutError:
-                # Periodic health check + group message check
+                # Periodic health check
                 try:
                     async with session.get(f"{agent_base}/agent/health",
                                            timeout=aiohttp.ClientTimeout(total=5)) as resp:
@@ -2048,12 +1649,6 @@ async def run_bridge(profile_id, agent_port, db_path):
                             log(profile_id, "tab worker health check failed")
                 except Exception:
                     log(profile_id, "tab worker unreachable")
-
-                # Check for group messages (non-blocking)
-                if not group_message_queue.empty():
-                    log(profile_id, "processing group message...")
-                    await process_group_message(session, agent_base, profile_id,
-                        core, group_message_queue, group_last_msg_ts, chat_map)
                 continue
 
             from_id = msg["from"]
@@ -2167,12 +1762,10 @@ async def run_bridge(profile_id, agent_port, db_path):
                     log(profile_id, "zai_new_chat returned None, will try to send to current page anyway")
             else:
                 log(profile_id, f"continuing z.ai chat {chat_id} for {from_id}")
-                set_session_binding(profile_id, chat_id, "private", from_id)
-                # Navigate to the existing chat so z.ai's input box loads.
-                # Wait 10s for page load (z.ai Agent mode is slow to render).
+                # Navigate to the existing chat so z.ai's input box loads
                 await zai_eval(session, agent_base,
                     f"window.location.href = 'https://chat.z.ai/c/{chat_id}'")
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)
 
             # Type + send (with high-traffic retry)
             ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content_clean, core, from_id)
@@ -2184,24 +1777,22 @@ async def run_bridge(profile_id, agent_port, db_path):
             # Record the number of assistant messages BEFORE sending,
             # so we only stream NEW responses (not old ones from the
             # chat history).
-            # CRITICAL: Use CDP DOM domain (zai_dom_text_all) — same method
-            # as zai_read_response_via_dom — so the count matches exactly.
-            # Previously used zai_eval (JS) which counted more elements
-            # (markdown-prose children, etc.), causing pre_count > actual
-            # DOM count, which made zai_read_response_via_dom return
-            # 'waiting' forever (slice [pre_count:] was always empty).
-            pre_count_htmls = await zai_dom_text_all(session, agent_base,
-                '[class*="chat-assistant"]', timeout=10)
-            pre_count = len(pre_count_htmls) if pre_count_htmls else 0
-            # Record the last message content BEFORE send, so we can detect
-            # when z.ai REPLACES the last message (instead of appending a new one).
-            import hashlib
-            pre_last_hash = ""
-            if pre_count_htmls:
-                import re as _re
-                pre_last_text = _re.sub(r'<[^>]+>', '', pre_count_htmls[-1]).strip()[:500]
-                pre_last_hash = hashlib.md5(pre_last_text.encode()).hexdigest()
-            log(profile_id, f"assistant messages before send: {pre_count} (last_hash={pre_last_hash[:8]})")
+            pre_count = await zai_eval(session, agent_base, """(function(){
+                var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
+                var asst = [];
+                for (var s = 0; s < sels.length; s++) {
+                    var f = document.querySelectorAll(sels[s]);
+                    for (var i = 0; i < f.length; i++) asst.push(f[i]);
+                }
+                var seen = {};
+                asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
+                asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
+                return asst.length;
+            })()""")
+            if not isinstance(pre_count, int):
+                try: pre_count = int(pre_count)
+                except: pre_count = 0
+            log(profile_id, f"assistant messages before send: {pre_count}")
 
             # Enable Fetch capture BEFORE sending — z.ai Agent mode streams
             # output via fetch streaming. When z.ai's JS thread is blocked
@@ -2403,7 +1994,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                 # even when z.ai's JS is blocked by ReadableStream processing).
                 # FALLBACK: eval (if DOM domain returns nothing).
                 result = await zai_read_response_via_dom(
-                    session, agent_base, pre_count=pre_count, timeout=15, pre_last_hash=pre_last_hash)
+                    session, agent_base, pre_count=pre_count, timeout=15)
                 if not result or result.get("stage") not in ("responding", "error"):
                     # DOM domain didn't find a response — try eval as fallback
                     try:
