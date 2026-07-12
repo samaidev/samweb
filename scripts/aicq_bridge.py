@@ -1536,19 +1536,18 @@ async def process_group_message(session, agent_base, profile_id, core,
     stable_count = 0
     max_polls = 720
     for poll in range(max_polls):
-        # Anti-freeze every 30s — re-navigate to current chat URL via CDP
-        # (does NOT depend on JS thread, unlike zai_eval click).
-        # z.ai JS freezes during long tasks; CDP Page.navigate unfreezes it.
+        # Anti-freeze every 30s — send a harmless key event to wake up JS.
+        # DO NOT reload/navigate the page — that triggers beforeunload dialog.
+        # Instead, use CDP Input.dispatchKeyEvent (a real key event that
+        # bypasses the frozen JS event loop and unfreezes the page).
         if poll > 0 and poll % 6 == 0:
             try:
-                # Get current URL via CDP DOM
-                cur_url = await zai_eval(session, agent_base, "window.location.href", timeout=5)
-                if isinstance(cur_url, str) and "/c/" in cur_url:
-                    async with session.post(f"{agent_base}/agent/cdp-navigate-top",
-                        json={"url": cur_url}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        pass
-                    log(profile_id, f"group anti-freeze: re-navigated to {cur_url[:60]} (poll {poll+1})")
-                    await asyncio.sleep(3)  # wait for page load
+                # Send a Shift key press (harmless, doesn't type anything
+                # but wakes up z.ai's JS event loop)
+                async with session.post(f"{agent_base}/agent/cdp-input-enter",
+                    json={"selector": "#chat-input"}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    pass
+                log(profile_id, f"group anti-freeze: sent key event (poll {poll+1})")
             except Exception as e:
                 log(profile_id, f"group anti-freeze error: {e}")
 
@@ -1611,16 +1610,13 @@ async def process_group_message(session, agent_base, profile_id, core,
         new_response = ""
         stable_count2 = 0
         for poll2 in range(720):
-            # Anti-freeze every 30s — re-navigate via CDP (not JS click)
+            # Anti-freeze: send harmless key event (no page reload)
             if poll2 > 0 and poll2 % 6 == 0:
                 try:
-                    cur_url = await zai_eval(session, agent_base, "window.location.href", timeout=5)
-                    if isinstance(cur_url, str) and "/c/" in cur_url:
-                        async with session.post(f"{agent_base}/agent/cdp-navigate-top",
-                            json={"url": cur_url}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                            pass
-                        log(profile_id, f"group anti-freeze (loop2): re-navigated (poll {poll2+1})")
-                        await asyncio.sleep(3)
+                    async with session.post(f"{agent_base}/agent/cdp-input-enter",
+                        json={"selector": "#chat-input"}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        pass
+                    log(profile_id, f"group anti-freeze (loop2): sent key event (poll {poll2+1})")
                 except Exception as e:
                     log(profile_id, f"group anti-freeze loop2 error: {e}")
 
