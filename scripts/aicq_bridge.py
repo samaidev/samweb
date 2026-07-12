@@ -217,10 +217,17 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
     all_html = await zai_dom_text_all(session, agent_base, '[class*="chat-assistant"]', timeout=timeout)
     if not all_html:
         return {"stage": "waiting"}
-    # Only consider NEW messages (index >= pre_count)
-    new_htmls = all_html[pre_count:] if pre_count > 0 else all_html
+    # Only consider NEW messages (index >= pre_count).
+    # FIX: If pre_count >= len(all_html), z.ai deleted old messages.
+    # Take the LAST message as the new response.
+    if pre_count > 0:
+        if pre_count >= len(all_html):
+            new_htmls = all_html[-1:]
+        else:
+            new_htmls = all_html[pre_count:]
+    else:
+        new_htmls = all_html
     if not new_htmls:
-        # No new assistant messages yet — z.ai hasn't generated a response
         return {"stage": "waiting"}
     # Take the LAST new message (most recent response)
     html = new_htmls[-1]
