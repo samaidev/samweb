@@ -1536,20 +1536,15 @@ async def process_group_message(session, agent_base, profile_id, core,
     stable_count = 0
     max_polls = 720
     for poll in range(max_polls):
-        # Anti-freeze every 30s — send a harmless key event to wake up JS.
-        # DO NOT reload/navigate the page — that triggers beforeunload dialog.
-        # Instead, use CDP Input.dispatchKeyEvent (a real key event that
-        # bypasses the frozen JS event loop and unfreezes the page).
+        # Anti-freeze every 30s
         if poll > 0 and poll % 6 == 0:
             try:
-                # Send a Shift key press (harmless, doesn't type anything
-                # but wakes up z.ai's JS event loop)
-                async with session.post(f"{agent_base}/agent/cdp-input-enter",
-                    json={"selector": "#chat-input"}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    pass
-                log(profile_id, f"group anti-freeze: sent key event (poll {poll+1})")
-            except Exception as e:
-                log(profile_id, f"group anti-freeze error: {e}")
+                await zai_eval(session, agent_base, """(function(){
+                    var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
+                    if (chatBtns.length > 0) { chatBtns[0].click(); return "clicked"; }
+                    return "no_chat";
+                })()""", timeout=5)
+            except: pass
 
         result = await zai_read_response_via_dom(
             session, agent_base, pre_count=pre_count, timeout=15,
@@ -1610,15 +1605,14 @@ async def process_group_message(session, agent_base, profile_id, core,
         new_response = ""
         stable_count2 = 0
         for poll2 in range(720):
-            # Anti-freeze: send harmless key event (no page reload)
             if poll2 > 0 and poll2 % 6 == 0:
                 try:
-                    async with session.post(f"{agent_base}/agent/cdp-input-enter",
-                        json={"selector": "#chat-input"}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                        pass
-                    log(profile_id, f"group anti-freeze (loop2): sent key event (poll {poll2+1})")
-                except Exception as e:
-                    log(profile_id, f"group anti-freeze loop2 error: {e}")
+                    await zai_eval(session, agent_base, """(function(){
+                        var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
+                        if (chatBtns.length > 0) { chatBtns[0].click(); return "clicked"; }
+                        return "no_chat";
+                    })()""", timeout=5)
+                except: pass
 
             result2 = await zai_read_response_via_dom(
                 session, agent_base, pre_count=pre_count2, timeout=15,
