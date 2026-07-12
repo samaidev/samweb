@@ -1739,6 +1739,11 @@ async def run_bridge(profile_id, agent_port, db_path):
             
             if is_generating:
                 log(profile_id, "z.ai is still generating! Starting auto-stream...")
+                auto_target_type, auto_target_id = get_session_target(profile_id, first_chat_id)
+                if not auto_target_type:
+                    auto_target_type = "private"
+                    auto_target_id = "1000008"
+                log(profile_id, f"auto-stream target: {auto_target_type} {auto_target_id}")
                 # Record pre_count (messages before the current generation)
                 pre_count = await zai_eval(session, agent_base, """(function(){
                     var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
@@ -1760,7 +1765,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                 # (which includes the latest assistant output) in that window.
                 if core:
                     try:
-                        await core.send_stream_chunk("1000008", "thinking", "检测到 z.ai 正在执行，接续输出中...")
+                        await core.send_stream_chunk(auto_target_id, "thinking", "检测到 z.ai 正在执行，接续输出中...")
                     except: pass
 
                 last_sent_text = ""
@@ -1792,14 +1797,14 @@ async def run_bridge(profile_id, agent_port, db_path):
                                         # True incremental: send only new part
                                         new_part = result[len(last_sent_text):]
                                         if new_part:
-                                            await core.send_stream_chunk("1000008", "text", new_part)
+                                            await core.send_stream_chunk(auto_target_id, "text", new_part)
                                     elif last_sent_text:
                                         # Content changed non-appendedly: clear + full
-                                        await core.send_stream_chunk("1000008", "clear_text", "")
-                                        await core.send_stream_chunk("1000008", "text", result)
+                                        await core.send_stream_chunk(auto_target_id, "clear_text", "")
+                                        await core.send_stream_chunk(auto_target_id, "text", result)
                                     else:
                                         # First send
-                                        await core.send_stream_chunk("1000008", "text", result)
+                                        await core.send_stream_chunk(auto_target_id, "text", result)
                                 except: pass
                             last_sent_text = result
                             stable_count = 0
@@ -1812,20 +1817,20 @@ async def run_bridge(profile_id, agent_port, db_path):
                                 log(profile_id, f"auto-stream complete ({len(result)} chars)")
                                 if core:
                                     try:
-                                        await core.send_stream_chunk("1000008", "thinking", "")
-                                        await core.send_stream_end("1000008",
+                                        await core.send_stream_chunk(auto_target_id, "thinking", "")
+                                        await core.send_stream_end(auto_target_id,
                                             text_segments=[result] if result else None,
                                             content_order=["text"] if result else None)
                                     except: pass
                                 break
                             if core:
-                                try: await core.send_stream_chunk("1000008", "thinking",
+                                try: await core.send_stream_chunk(auto_target_id, "thinking",
                                     f"z.ai 执行中... ({len(result)} 字, 等待更新)")
                                 except: pass
                     else:
                         # Couldn't read content (JS still blocked or page not loaded)
                         if core and refresh_cycle % 4 == 0:
-                            try: await core.send_stream_chunk("1000008", "thinking",
+                            try: await core.send_stream_chunk(auto_target_id, "thinking",
                                 f"z.ai 执行中... (已等待 {(refresh_cycle+1)*30}s)")
                             except: pass
                         log(profile_id, f"auto-stream: no content read (cycle {refresh_cycle+1})")
@@ -1841,8 +1846,8 @@ async def run_bridge(profile_id, agent_port, db_path):
                             log(profile_id, f"auto-stream: no content for 3 cycles, finishing")
                             if core:
                                 try:
-                                    await core.send_stream_chunk("1000008", "thinking", "")
-                                    await core.send_stream_end("1000008",
+                                    await core.send_stream_chunk(auto_target_id, "thinking", "")
+                                    await core.send_stream_end(auto_target_id,
                                         text_segments=[last_sent_text] if last_sent_text else None,
                                         content_order=["text"] if last_sent_text else None)
                                 except: pass
@@ -1857,16 +1862,16 @@ async def run_bridge(profile_id, agent_port, db_path):
                 if last_sent_text:
                     if core:
                         try:
-                            await core.send_stream_chunk("1000008", "thinking", "")
-                            await core.send_stream_end("1000008")
+                            await core.send_stream_chunk(auto_target_id, "thinking", "")
+                            await core.send_stream_end(auto_target_id)
                         except: pass
                     log(profile_id, f"auto-stream finished (sent {len(last_sent_text)} chars)")
                 else:
                     # No output captured — clear thinking and end stream
                     if core:
                         try:
-                            await core.send_stream_chunk("1000008", "thinking", "")
-                            await core.send_stream_end("1000008")
+                            await core.send_stream_chunk(auto_target_id, "thinking", "")
+                            await core.send_stream_end(auto_target_id)
                         except: pass
                     log(profile_id, "auto-stream: no output captured")
             else:
