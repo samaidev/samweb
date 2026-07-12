@@ -141,6 +141,88 @@ async def zai_dom_text_all(session, agent_base, selector, timeout=15):
         return []
 
 
+def html_to_markdown(html):
+    """Convert z.ai's rendered HTML to markdown source.
+
+    AICQ renders markdown, not HTML. z.ai's DOM is rendered HTML
+    (h1, ul, li, code, etc). We convert back to markdown so AICQ
+    can render it with the same style as z.ai.
+
+    Supported conversions:
+    - <h1>-<h6> -> #, ##, ###, etc
+    - <ul><li> -> - item
+    - <ol><li> -> 1. item
+    - <input type="checkbox"> -> - [ ] or - [x]
+    - <strong>/<b> -> **text**
+    - <em>/<i> -> *text*
+    - <code> -> `text`
+    - <pre> -> ```code```
+    - <br> -> newline
+    - <p> -> text + newline
+    - <a href="url">text</a> -> [text](url)
+    """
+    import re as _re
+
+    # Remove Svelte template markers
+    md = _re.sub(r'<!--.*?-->', '', html, flags=_re.DOTALL)
+
+    # Remove SVG elements
+    md = _re.sub(r'<svg[^>]*>.*?</svg>', '', md, flags=_re.DOTALL)
+
+    # Remove button elements
+    md = _re.sub(r'<button[^>]*>.*?</button>', '', md, flags=_re.DOTALL)
+
+    # Convert checkboxes before list items
+    md = _re.sub(r'<input[^>]*type="checkbox"[^>]*checked[^>]*>', '[x] ', md, flags=_re.IGNORECASE)
+    md = _re.sub(r'<input[^>]*type="checkbox"[^>]*>', '[ ] ', md, flags=_re.IGNORECASE)
+
+    # Convert headings
+    for i in range(6, 0, -1):
+        md = _re.sub(f'<h{i}[^>]*>(.*?)</h{i}>', lambda m, lvl=i: '#' * lvl + ' ' + m.group(1).strip(), md, flags=_re.DOTALL | _re.IGNORECASE)
+
+    # Convert links
+    md = _re.sub(r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>', r'[]()', md, flags=_re.DOTALL | _re.IGNORECASE)
+
+    # Convert bold
+    md = _re.sub(r'<(strong|b)[^>]*>(.*?)</>', r'****', md, flags=_re.DOTALL | _re.IGNORECASE)
+
+    # Convert italic
+    md = _re.sub(r'<(em|i)[^>]*>(.*?)</>', r'**', md, flags=_re.DOTALL | _re.IGNORECASE)
+
+    # Convert inline code
+    md = _re.sub(r'<code[^>]*>(.*?)</code>', r'``', md, flags=_re.DOTALL | _re.IGNORECASE)
+
+    # Convert code blocks
+    md = _re.sub(r'<pre[^>]*>(.*?)</pre>', lambda m: '```\n' + _re.sub(r'<[^>]+>', '', m.group(1)).strip() + '\n```', md, flags=_re.DOTALL | _re.IGNORECASE)
+
+    # Convert list items
+    md = _re.sub(r'<li[^>]*>(.*?)</li>', lambda m: '- ' + m.group(1).strip() + '\n', md, flags=_re.DOTALL | _re.IGNORECASE)
+
+    # Remove ul/ol tags (keep li content)
+    md = _re.sub(r'</?(ul|ol)[^>]*>', '', md, flags=_re.IGNORECASE)
+
+    # Convert <br> to newline
+    md = _re.sub(r'<br\s*/?>', '\n', md, flags=_re.IGNORECASE)
+
+    # Convert <p> to text + double newline
+    md = _re.sub(r'<p[^>]*>(.*?)</p>', lambda m: m.group(1).strip() + '\n\n', md, flags=_re.DOTALL | _re.IGNORECASE)
+
+    # Convert <hr> to ---
+    md = _re.sub(r'<hr[^>]*/?>', '\n---\n', md, flags=_re.IGNORECASE)
+
+    # Remove all remaining HTML tags
+    md = _re.sub(r'<[^>]+>', '', md)
+
+    # Decode HTML entities
+    md = md.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
+
+    # Clean up whitespace
+    md = _re.sub(r'\n\s*\n\s*\n+', '\n\n', md)
+    md = md.strip()
+
+    return md
+
+
 def clean_zai_html(html):
     """Clean z.ai's Svelte-generated HTML into proper markdown/HTML
     that aicq.me can render correctly.
@@ -196,7 +278,7 @@ def clean_zai_html(html):
     return cleaned
 
 
-async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15):
+async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15, pre_last_hash=""):
     """Read z.ai's latest NEW assistant response via CDP DOM domain.
 
     CRITICAL FIX (2026-07-12): Now actually uses pre_count to only
@@ -218,11 +300,23 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
     if not all_html:
         return {"stage": "waiting"}
     # Only consider NEW messages (index >= pre_count).
-    # FIX: If pre_count >= len(all_html), z.ai deleted old messages.
-    # Take the LAST message as the new response.
+    # If pre_count >= len(all_html), z.ai may have REPLACED the last message
+    # (instead of appending). Compare last message hash to detect replacement.
     if pre_count > 0:
         if pre_count >= len(all_html):
-            new_htmls = all_html[-1:]
+            # No new message appended — check if last message CHANGED
+            if pre_last_hash and all_html:
+                import re as _re2
+                import hashlib
+                cur_last_text = _re2.sub(r'<[^>]+>', '', all_html[-1]).strip()[:500]
+                cur_last_hash = hashlib.md5(cur_last_text.encode()).hexdigest()
+                if cur_last_hash != pre_last_hash:
+                    # Last message changed — treat as new response
+                    new_htmls = [all_html[-1]]
+                else:
+                    return {"stage": "waiting"}
+            else:
+                return {"stage": "waiting"}
         else:
             new_htmls = all_html[pre_count:]
     else:
@@ -242,8 +336,8 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
                                             '当前模型使用人数较多', '用量已超出',
                                             '超出个人限制', 'Sandbox limit']):
         return {"stage": "error", "error": text_content[:200]}
-    cleaned_html = clean_zai_html(html)
-    return {"stage": "responding", "response": cleaned_html}
+    markdown = html_to_markdown(html)
+    return {"stage": "responding", "response": markdown}
 
 
 async def zai_eval(session, agent_base, script, timeout=10):
@@ -1789,7 +1883,15 @@ async def run_bridge(profile_id, agent_port, db_path):
             pre_count_htmls = await zai_dom_text_all(session, agent_base,
                 '[class*="chat-assistant"]', timeout=10)
             pre_count = len(pre_count_htmls) if pre_count_htmls else 0
-            log(profile_id, f"assistant messages before send: {pre_count}")
+            # Record the last message content BEFORE send, so we can detect
+            # when z.ai REPLACES the last message (instead of appending a new one).
+            import hashlib
+            pre_last_hash = ""
+            if pre_count_htmls:
+                import re as _re
+                pre_last_text = _re.sub(r'<[^>]+>', '', pre_count_htmls[-1]).strip()[:500]
+                pre_last_hash = hashlib.md5(pre_last_text.encode()).hexdigest()
+            log(profile_id, f"assistant messages before send: {pre_count} (last_hash={pre_last_hash[:8]})")
 
             # Enable Fetch capture BEFORE sending — z.ai Agent mode streams
             # output via fetch streaming. When z.ai's JS thread is blocked
@@ -1824,26 +1926,46 @@ async def run_bridge(profile_id, agent_port, db_path):
                 # The click is non-destructive: clicking Agent mode when
                 # already active is a no-op; clicking the current chat just
                 # re-focuses it (no navigation).
-                if poll > 0 and poll % 6 == 0:
-                    # Anti-freeze: every 30s, click the current chat in
-                    # the sidebar to keep z.ai's JS thread alive.
-                    # DO NOT click the Agent mode button — it is a TOGGLE
-                    # and clicking when already active switches BACK to
-                    # Chat mode, losing all Agent task output.
-                    try:
-                        await zai_eval(session, agent_base, """(function(){
-                            // Click the current chat in sidebar (re-focus, no nav)
-                            var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
-                            if (chatBtns.length > 0) {
-                                // Click the first one (current chat is at top after navigation)
-                                chatBtns[0].click();
-                                return "clicked_chat";
-                            }
-                            return "no_chat_btn";
-                        })()""", timeout=5)
-                        log(profile_id, f"anti-freeze: clicked current chat (poll {poll+1}/{max_polls})")
-                    except Exception as e:
-                        log(profile_id, f"anti-freeze click error: {e}")
+                if poll > 0 and poll % 6 == 0:
+
+                    # Anti-freeze: every 30s, click the current chat in
+
+                    # the sidebar to keep z.ai's JS thread alive.
+
+                    # DO NOT click the Agent mode button — it is a TOGGLE
+
+                    # and clicking when already active switches BACK to
+
+                    # Chat mode, losing all Agent task output.
+
+                    try:
+
+                        await zai_eval(session, agent_base, """(function(){
+
+                            // Click the current chat in sidebar (re-focus, no nav)
+
+                            var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
+
+                            if (chatBtns.length > 0) {
+
+                                // Click the first one (current chat is at top after navigation)
+
+                                chatBtns[0].click();
+
+                                return "clicked_chat";
+
+                            }
+
+                            return "no_chat_btn";
+
+                        })()""", timeout=5)
+
+                        log(profile_id, f"anti-freeze: clicked current chat (poll {poll+1}/{max_polls})")
+
+                    except Exception as e:
+
+                        log(profile_id, f"anti-freeze click error: {e}")
+
 
                 # Step 1: Check Fetch chunks FIRST — works even when z.ai's
                 # JS thread is fully blocked during a long Agent task.
@@ -1971,7 +2093,7 @@ async def run_bridge(profile_id, agent_port, db_path):
                 # even when z.ai's JS is blocked by ReadableStream processing).
                 # FALLBACK: eval (if DOM domain returns nothing).
                 result = await zai_read_response_via_dom(
-                    session, agent_base, pre_count=pre_count, timeout=15)
+                    session, agent_base, pre_count=pre_count, timeout=15, pre_last_hash=pre_last_hash)
                 if not result or result.get("stage") not in ("responding", "error"):
                     # DOM domain didn't find a response — try eval as fallback
                     try:
