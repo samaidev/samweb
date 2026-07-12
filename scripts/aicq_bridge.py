@@ -1536,15 +1536,21 @@ async def process_group_message(session, agent_base, profile_id, core,
     stable_count = 0
     max_polls = 720
     for poll in range(max_polls):
-        # Anti-freeze every 30s
+        # Anti-freeze every 30s — re-navigate to current chat URL via CDP
+        # (does NOT depend on JS thread, unlike zai_eval click).
+        # z.ai JS freezes during long tasks; CDP Page.navigate unfreezes it.
         if poll > 0 and poll % 6 == 0:
             try:
-                await zai_eval(session, agent_base, """(function(){
-                    var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
-                    if (chatBtns.length > 0) { chatBtns[0].click(); return "clicked"; }
-                    return "no_chat";
-                })()""", timeout=5)
-            except: pass
+                # Get current URL via CDP DOM
+                cur_url = await zai_eval(session, agent_base, "window.location.href", timeout=5)
+                if isinstance(cur_url, str) and "/c/" in cur_url:
+                    async with session.post(f"{agent_base}/agent/cdp-navigate-top",
+                        json={"url": cur_url}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        pass
+                    log(profile_id, f"group anti-freeze: re-navigated to {cur_url[:60]} (poll {poll+1})")
+                    await asyncio.sleep(3)  # wait for page load
+            except Exception as e:
+                log(profile_id, f"group anti-freeze error: {e}")
 
         result = await zai_read_response_via_dom(
             session, agent_base, pre_count=pre_count, timeout=15,
@@ -1605,14 +1611,18 @@ async def process_group_message(session, agent_base, profile_id, core,
         new_response = ""
         stable_count2 = 0
         for poll2 in range(720):
+            # Anti-freeze every 30s — re-navigate via CDP (not JS click)
             if poll2 > 0 and poll2 % 6 == 0:
                 try:
-                    await zai_eval(session, agent_base, """(function(){
-                        var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
-                        if (chatBtns.length > 0) { chatBtns[0].click(); return "clicked"; }
-                        return "no_chat";
-                    })()""", timeout=5)
-                except: pass
+                    cur_url = await zai_eval(session, agent_base, "window.location.href", timeout=5)
+                    if isinstance(cur_url, str) and "/c/" in cur_url:
+                        async with session.post(f"{agent_base}/agent/cdp-navigate-top",
+                            json={"url": cur_url}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                            pass
+                        log(profile_id, f"group anti-freeze (loop2): re-navigated (poll {poll2+1})")
+                        await asyncio.sleep(3)
+                except Exception as e:
+                    log(profile_id, f"group anti-freeze loop2 error: {e}")
 
             result2 = await zai_read_response_via_dom(
                 session, agent_base, pre_count=pre_count2, timeout=15,
