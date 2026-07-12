@@ -121,6 +121,26 @@ async def zai_dom_text_last(session, agent_base, selector, timeout=15):
         return ""
 
 
+async def zai_dom_text_all(session, agent_base, selector, timeout=15):
+    """Read ALL matching elements' HTML via CDP DOM domain.
+    Uses /agent/cdp-dom-text-all (DOM.querySelectorAll → getOuterHTML on ALL).
+    Returns a list of HTML strings (one per match).
+    Needed for filtering out OLD assistant messages via pre_count slicing.
+    """
+    async def _do_dom():
+        resp = await session.post(f"{agent_base}/agent/cdp-dom-text-all",
+                                  json={"selector": selector},
+                                  timeout=aiohttp.ClientTimeout(total=timeout))
+        data = await resp.json()
+        return data.get("htmls", []) or []
+    try:
+        return await asyncio.wait_for(_do_dom(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return []
+    except Exception:
+        return []
+
+
 def clean_zai_html(html):
     """Clean z.ai's Svelte-generated HTML into proper markdown/HTML
     that aicq.me can render correctly.
@@ -177,66 +197,50 @@ def clean_zai_html(html):
 
 
 async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15):
-    """Read z.ai's latest assistant response via CDP DOM domain.
+    """Read z.ai's latest NEW assistant response via CDP DOM domain.
 
-    This is the FALLBACK when zai_eval times out (z.ai JS thread blocked).
-    The DOM domain reads element HTML directly via CDP WebSocket — it does
-    NOT require the page's JS thread to be free.
+    CRITICAL FIX (2026-07-12): Now actually uses pre_count to only
+    consider NEW assistant messages (those at index >= pre_count).
+    Previously this function took pre_count but IGNORED it, always
+    returning the LAST matching element — which could be an OLD
+    message if z.ai hasn't generated a new one yet.
 
-    Uses /agent/cdp-dom-text-last to get the LAST matching element (the
-    newest assistant message), not the first one.
-
-    Returns a dict {stage, response} similar to the eval-based check:
-      - {stage:'responding', response: '<clean html or text>'} — response found
-      - {stage:'waiting'} — no new assistant messages (or empty/loading)
-      - {stage:'error', error: '...'} — error message detected
+    Strategy: For each selector, get ALL matching elements via
+    zai_dom_text_all, slice [pre_count:], and return the LAST one
+    (the newest NEW response). If no new messages exist with any
+    selector, return {stage: waiting}.
     """
-    # Try multiple selectors for the assistant message container.
-    # IMPORTANT: Read the INNER markdown-prose element (the actual response
-    # text), NOT the outer chat-assistant container (which includes z.ai's
-    # UI controls like the stop button with SVG icons).
-    # Order matters: try the most specific (innermost) selectors first.
     selectors = [
-        '[class*="markdown-prose"]',
-        '[class*="prose"]',
+        '[class*="chat-assistant"]',
         '[class*="assistant-message"]',
         '[class*="agent-message"]',
-        '[class*="chat-assistant"]',
+        '[class*="markdown-prose"]',
+        '[class*="prose"]',
     ]
     for sel in selectors:
-        html = await zai_dom_text_last(session, agent_base, sel, timeout=timeout)
+        all_html = await zai_dom_text_all(session, agent_base, sel, timeout=timeout)
+        if not all_html:
+            continue
+        # Only consider NEW messages (index >= pre_count)
+        new_htmls = all_html[pre_count:] if pre_count > 0 else all_html
+        if not new_htmls:
+            continue
+        # Take the LAST new message (most recent response)
+        html = new_htmls[-1]
         if not html or len(html) < 20:
             continue
-
-        # Extract visible text content from the HTML to check if the
-        # response is actually present (not just an empty container).
-        # z.ai uses Svelte and may have empty <div class="markdown-prose">
-        # containers while the response is being rendered.
         import re as _re
-        # Remove HTML tags to get visible text
         text_content = _re.sub(r'<[^>]+>', '', html).strip()
-        # Remove Svelte template markers (<!---->)
         text_content = _re.sub(r'<!--.*?-->', '', text_content).strip()
-
         if len(text_content) < 5:
-            # Empty or loading response — skip this selector, try next
             continue
-
-        # Check for error messages in the TEXT content (not the HTML,
-        # to avoid false positives from class names/attributes)
         if any(err in text_content for err in ['回复内容为空', '请稍后重试', '限制沙箱',
                                                 '当前模型使用人数较多', '用量已超出',
                                                 '超出个人限制', 'Sandbox limit']):
             return {"stage": "error", "error": text_content[:200]}
-
-        # Clean the HTML to remove Svelte markers and produce proper
-        # markdown/HTML that aicq.me can render correctly.
         cleaned_html = clean_zai_html(html)
-
-        # If cleaned HTML is just plain text (no tags), return as text
         if '<' not in cleaned_html:
             return {"stage": "responding", "response": cleaned_html}
-        # Otherwise return the cleaned HTML
         return {"stage": "responding", "response": cleaned_html}
     return {"stage": "waiting"}
 
@@ -832,28 +836,66 @@ async def zai_delete_all_chats(session, agent_base, profile_id):
 
 
 async def zai_new_chat(session, agent_base, profile_id):
-    """Click '新聊天' to start a new chat. Returns the chat_id from URL."""
+    """Click '新聊天' to start a new chat. Returns the chat_id from URL.
+
+    FIX: z.ai has multiple elements whose innerText is exactly '新聊天'
+    (a wrapper DIV, an inner DIV, and the actual BUTTON). The old code
+    iterated 'button, a, div' and could click on a non-clickable wrapper
+    DIV first, which did nothing. We now prefer BUTTON tags, and also
+    wait for the URL to actually change to /c/<id> before returning.
+    """
     log(profile_id, "creating new chat...")
+
+    # Record current URL so we can detect navigation
+    before_url = await zai_eval(session, agent_base, "window.location.href")
+    if not isinstance(before_url, str):
+        before_url = ""
+
+    # Strategy 1: click the BUTTON whose trimmed innerText is '新聊天'
     result = await zai_eval(session, agent_base, """(function(){
-        // Find "新聊天" button
-        var all = document.querySelectorAll('button, a, div');
-        for (var el of all) {
-            var t = (el.innerText || '').trim();
-            if (t === '新聊天' || t === 'New Chat' || t === '新建对话') {
-                var r = el.getBoundingClientRect();
-                if (r.width > 0 && r.height > 0) { el.click(); return 'clicked'; }
+        // First try: BUTTON elements whose trimmed innerText is exactly '新聊天'
+        var btns = document.querySelectorAll('button');
+        for (var i = 0; i < btns.length; i++) {
+            var b = btns[i];
+            var t = (b.innerText || '').trim();
+            if (t === '新聊天' || t === 'New Chat' || t === '新建对话' || t === '新对话') {
+                var r = b.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) {
+                    b.click();
+                    return JSON.stringify({clicked: 'button', cls: (b.className||'').toString().slice(0,80)});
+                }
             }
         }
-        return 'not_found';
+        // Fallback: any element with exact text '新聊天' that is NOT a
+        // generic container (avoid DIVs with many children — wrappers).
+        var all = document.querySelectorAll('a, div');
+        for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            var t = (el.innerText || '').trim();
+            if (t === '新聊天' || t === 'New Chat' || t === '新建对话' || t === '新对话') {
+                if (el.children.length > 1) continue;
+                var r = el.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) {
+                    el.click();
+                    return JSON.stringify({clicked: 'fallback', cls: (el.className||'').toString().slice(0,80)});
+                }
+            }
+        }
+        return JSON.stringify({clicked: 'not_found'});
     })()""")
-    log(profile_id, f"new chat: {result}")
-    await asyncio.sleep(3)
+    if isinstance(result, str):
+        try: result = json.loads(result)
+        except: result = {"clicked": "parse_error"}
+    log(profile_id, f"new chat click: {result}")
 
-    # Get chat_id from URL
-    state = await zai_eval(session, agent_base, "window.location.href")
+    # Wait for URL to change to /c/<id> (max 10s)
     chat_id = None
-    if isinstance(state, str) and "/c/" in state:
-        chat_id = state.split("/c/")[-1].split("/")[0].split("?")[0]
+    for wait_i in range(20):
+        await asyncio.sleep(0.5)
+        state = await zai_eval(session, agent_base, "window.location.href")
+        if isinstance(state, str) and "/c/" in state and state != before_url:
+            chat_id = state.split("/c/")[-1].split("/")[0].split("?")[0]
+            break
     log(profile_id, f"new chat_id: {chat_id}")
     return chat_id
 
@@ -1710,22 +1752,30 @@ async def run_bridge(profile_id, agent_port, db_path):
                     await core.send_message(from_id, "⚠️ 没有可释放的容器")
                 continue
 
-            # Default: ALWAYS create a new z.ai chat for each message.
-            # aicq.me's "New Chat" button (加号) doesn't send a session
-            # signal to the bridge, so we can't distinguish between
-            # "continue in same chat" and "new chat". Since z.ai Agent
-            # mode creates a workspace per chat, and users expect "New
-            # Chat" to start fresh, we always create a new z.ai chat.
-            # This matches user expectations and avoids workspace limit
-            # issues (old chats get released automatically).
+            # Default: CONTINUE the existing chat for this friend.
+            # Only create a new z.ai chat on the FIRST message from this
+            # friend (when chat_map[from_id] is empty). Subsequent messages
+            # reuse the same z.ai chat so context is preserved across
+            # multi-turn conversations. User can type "/new" to force a
+            # new chat.
             #
-            # Exception: "/new" command already creates a new chat above.
-            # Exception: if this is the VERY FIRST message (no chat_map
-            # entry yet), we create a new chat normally.
-            log(profile_id, f"creating new z.ai chat for {from_id}")
-            chat_id = await zai_new_chat(session, agent_base, profile_id)
-            if chat_id:
-                chat_map[from_id] = chat_id
+            # FIX (2026-07-12): Previously this always created a new chat
+            # per message, which (a) leaked z.ai workspaces quickly and
+            # (b) didn't match user expectation of "continuing" a convo.
+            chat_id = chat_map.get(from_id)
+            if not chat_id:
+                log(profile_id, f"first message from {from_id}, creating new z.ai chat")
+                chat_id = await zai_new_chat(session, agent_base, profile_id)
+                if chat_id:
+                    chat_map[from_id] = chat_id
+                else:
+                    log(profile_id, "zai_new_chat returned None, will try to send to current page anyway")
+            else:
+                log(profile_id, f"continuing z.ai chat {chat_id} for {from_id}")
+                # Navigate to the existing chat so z.ai's input box loads
+                await zai_eval(session, agent_base,
+                    f"window.location.href = 'https://chat.z.ai/c/{chat_id}'")
+                await asyncio.sleep(5)
 
             # Type + send (with high-traffic retry)
             ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content_clean, core, from_id)

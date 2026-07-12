@@ -183,6 +183,62 @@ func Run(opts Options) error {
                         // Save the context for later use.
                         backend.SetContext(ctx)
                         log.Printf("[browser] wails app started")
+
+                        // [IMPROVED 2026-07-12] Auto-spawn all profile tab
+                        // workers on startup so the user doesn't have to
+                        // manually click "open all" each time. Each tab worker
+                        // opens maximized (via getScreenSize in wails_backend.go).
+                        go func() {
+                                // Wait for wails + WebView2 to fully initialize.
+                                // The CDP client connects ~1s after OnStartup,
+                                // and the UI server needs to be ready for the
+                                // tab workers to navigate.
+                                time.Sleep(5 * time.Second)
+
+                                ctx2, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+                                defer cancel()
+
+                                profs, _, err := backend.ListProfiles(ctx2)
+                                if err != nil {
+                                        log.Printf("[browser] auto-spawn: list profiles failed: %v", err)
+                                        return
+                                }
+                                if len(profs) == 0 {
+                                        log.Printf("[browser] auto-spawn: no profiles found, skipping")
+                                        return
+                                }
+
+                                // Check which profiles are already running
+                                // (avoid duplicate spawns if samweb restarts
+                                // while tab workers are still alive).
+                                running, err := backend.ListTabWorkers(ctx2)
+                                if err != nil {
+                                        log.Printf("[browser] auto-spawn: list tab workers failed: %v", err)
+                                        running = nil
+                                }
+                                runningSet := make(map[string]bool)
+                                for _, w := range running {
+                                        runningSet[w.ProfileID] = true
+                                }
+
+                                defaultURL := "https://chat.z.ai"
+                                spawned := 0
+                                for _, p := range profs {
+                                        if runningSet[p.ID] {
+                                                log.Printf("[browser] auto-spawn: profile %s already running, skipping", p.ID)
+                                                continue
+                                        }
+                                        log.Printf("[browser] auto-spawn: spawning profile %s", p.ID)
+                                        _, err := backend.SpawnTab(ctx2, p.ID, defaultURL)
+                                        if err != nil {
+                                                log.Printf("[browser] auto-spawn: profile %s failed: %v", p.ID, err)
+                                        } else {
+                                                spawned++
+                                        }
+                                }
+                                log.Printf("[browser] auto-spawn: done (%d/%d spawned, %d already running)",
+                                        spawned, len(profs), len(runningSet))
+                        }()
                 },
                 OnDomReady: func(ctx context.Context) {
                         // Inject the agent bootstrap JS.

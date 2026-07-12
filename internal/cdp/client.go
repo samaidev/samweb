@@ -1429,6 +1429,70 @@ func (c *Client) GetDOMTextLast(selector string) (string, error) {
         return oh.OuterHTML, nil
 }
 
+// GetDOMTextAll reads the outerHTML of ALL elements matching a CSS selector
+// via CDP DOM domain. Returns a slice of HTML strings (one per match).
+//
+// This is like GetDOMTextLast but returns ALL matches instead of just the
+// last one — needed by the bridge to filter out OLD assistant messages
+// (only consider messages at index >= pre_count, i.e. NEW responses).
+//
+// Bypasses the JS thread entirely, so it works even when z.ai's JS is
+// blocked during task execution.
+func (c *Client) GetDOMTextAll(selector string) ([]string, error) {
+        // 1. Get the root document
+        resp, err := c.send("DOM.getDocument", map[string]interface{}{
+                "depth": 0,
+        })
+        if err != nil {
+                return nil, fmt.Errorf("DOM.getDocument: %w", err)
+        }
+        var doc struct {
+                Root struct {
+                        NodeID int `json:"nodeId"`
+                } `json:"root"`
+        }
+        if err := json.Unmarshal(resp, &doc); err != nil {
+                return nil, fmt.Errorf("decode document: %w", err)
+        }
+
+        // 2. Query selector ALL for all matching elements
+        resp, err = c.send("DOM.querySelectorAll", map[string]interface{}{
+                "nodeId":   doc.Root.NodeID,
+                "selector": selector,
+        })
+        if err != nil {
+                return nil, fmt.Errorf("DOM.querySelectorAll: %w", err)
+        }
+        var qs struct {
+                NodeIDs []int `json:"nodeIds"`
+        }
+        if err := json.Unmarshal(resp, &qs); err != nil {
+                return nil, fmt.Errorf("decode querySelectorAll: %w", err)
+        }
+        if len(qs.NodeIDs) == 0 {
+                return nil, nil // no match
+        }
+
+        // 3. Get OUTER HTML of ALL matching elements
+        out := make([]string, 0, len(qs.NodeIDs))
+        for _, nodeID := range qs.NodeIDs {
+                resp, err = c.send("DOM.getOuterHTML", map[string]interface{}{
+                        "nodeId": nodeID,
+                })
+                if err != nil {
+                        continue // skip on error, return what we have
+                }
+                var oh struct {
+                        OuterHTML string `json:"outerHTML"`
+                }
+                if err := json.Unmarshal(resp, &oh); err != nil {
+                        continue
+                }
+                out = append(out, oh.OuterHTML)
+        }
+        return out, nil
+}
+
 // send sends a CDP command and waits for the response.
 // On timeout, attempts to reconnect once and retries.
 func (c *Client) send(method string, params interface{}) (json.RawMessage, error) {

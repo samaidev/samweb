@@ -670,6 +670,19 @@ func (b *WailsBackend) CDPDOMTextLast(ctx context.Context, selector string) (str
         return c.GetDOMTextLast(selector)
 }
 
+// CDPDOMTextAll reads ALL matching elements' HTML via CDP DOM domain.
+// Returns a slice of HTML strings (one per match). Used by the bridge
+// to filter out OLD assistant messages and only consider NEW responses
+// (those at index >= pre_count).
+func (b *WailsBackend) CDPDOMTextAll(ctx context.Context, selector string) ([]string, error) {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return nil, fmt.Errorf("CDP client not connected")
+        }
+        return c.GetDOMTextAll(selector)
+}
 func (b *WailsBackend) EnableSSECapture(ctx context.Context) error {
         b.cdpMu.RLock()
         c := b.cdpClient

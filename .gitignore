@@ -1,6 +1,8 @@
 # Binaries
 /samweb
 /samweb.exe
+/samweb.exe~
+/samweb.exe.new
 /samweb-agent-test
 /dist/
 /bin/
@@ -28,7 +30,27 @@ __pycache__/
 
 # Go
 vendor/
-skills/
-download/
-*.png
+
+# Logs
 *.log
+run.log
+run.err.log
+
+# AICQ SDK local state (do not commit)
+.aicq-sdk/
+
+# Samweb local state
+.samweb/data/
+.samweb/logs/
+
+# Agent debug artifacts (tool output, screenshots)
+tool-results/
+upload/
+
+# Sensitive / local-only
+code.txt
+.env.local
+
+# Backup files
+*.bak_*
+*.bak

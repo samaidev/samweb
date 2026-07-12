@@ -90,7 +90,9 @@ type Backend interface {
         // CDPDOMTextLast reads the LAST matching element's HTML via CDP DOM
         // domain. Needed for z.ai chat pages with multiple assistant messages
         // — we want the newest one, not the first.
-        CDPDOMTextLast(ctx context.Context, selector string) (string, error)
+        	CDPDOMTextLast(ctx context.Context, selector string) (string, error)
+	// CDPDOMTextAll reads ALL matching elements' HTML via CDP DOM domain
+	CDPDOMTextAll(ctx context.Context, selector string) ([]string, error)
 
         // SSE capture: z.ai streams Agent output via SSE/WebSocket.
         // These CDP events bypass JS thread entirely.

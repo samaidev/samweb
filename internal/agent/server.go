@@ -115,6 +115,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/cdp-eval", s.handleCDPEval)
         mux.HandleFunc("/agent/cdp-dom-text", s.handleCDPDOMText)
         mux.HandleFunc("/agent/cdp-dom-text-last", s.handleCDPDOMTextLast)
+mux.HandleFunc("/agent/cdp-dom-text-all", s.handleCDPDOMTextAll)
         mux.HandleFunc("/agent/sse-enable", s.handleSSEEnable)
         mux.HandleFunc("/agent/sse-messages", s.handleSSEMessages)
         // Fetch domain capture (works when z.ai JS thread is blocked)
@@ -774,6 +775,36 @@ func (s *Server) handleCDPDOMTextLast(w http.ResponseWriter, r *http.Request) {
                 return
         }
         writeJSON(w, http.StatusOK, map[string]string{"html": html})
+}
+
+// handleCDPDOMTextAll reads ALL matching elements' HTML via CDP DOM domain.
+// POST /agent/cdp-dom-text-all {"selector":"[class*='chat-assistant']"}
+// → {"htmls":["<div...>...</div>","<div...>...</div>"]}
+// Returns ALL matches (not just the last one) so the bridge can filter
+// out OLD assistant messages via pre_count slicing.
+func (s *Server) handleCDPDOMTextAll(w http.ResponseWriter, r *http.Request) {
+        var body struct {
+                Selector string `json:"selector"`
+        }
+        if err := readJSON(r, &body); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if body.Selector == "" {
+                writeError(w, http.StatusBadRequest, "selector is required")
+                return
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 15*time.Second)
+        defer cancel()
+        htmls, err := s.backend.CDPDOMTextAll(ctx, body.Selector)
+        if err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        if htmls == nil {
+                htmls = []string{}
+        }
+        writeJSON(w, http.StatusOK, map[string]interface{}{"htmls": htmls})
 }
 
 // handleSSEEnable enables SSE/WebSocket capture via CDP Network domain.
