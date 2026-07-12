@@ -12,9 +12,9 @@ BRIDGE_LOGS = [
     ("139", os.path.expanduser(r"~\.samweb\logs\139_bridge.log")),
 ]
 
-STUCK_THRESHOLD = 300  # 5 min
+STUCK_THRESHOLD = 600  # 10 min
 CHECK_INTERVAL = 60
-RESTART_COOLDOWN = 120
+RESTART_COOLDOWN = 300  # 5 min
 
 # Lines that indicate ACTUAL bridge activity (not AICQ SDK noise)
 ACTIVITY_KEYWORDS = [
@@ -23,6 +23,7 @@ ACTIVITY_KEYWORDS = [
     "chat input found", "streaming...", "response complete",
     "anti-freeze", "on_message", "on_group_message",
     "bridge ready", "session binding",
+    "starting bridge", "Agent mode", "selecting first", "checking if z.ai",
 ]
 
 def get_last_activity_time(path):
