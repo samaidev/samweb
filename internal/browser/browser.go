@@ -168,6 +168,7 @@ func Run(opts Options) error {
                 Title:     opts.Title,
                 Width:     opts.Width,
                 Height:    opts.Height,
+                WindowStartState: options.Maximised,
                 MinWidth:  400,
                 MinHeight: 300,
                 AssetServer: &assetserver.Options{

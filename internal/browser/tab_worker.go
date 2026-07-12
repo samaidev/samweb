@@ -175,6 +175,7 @@ func runTabWorker(opts Options) error {
                 Title:            opts.Title,
                 Width:            opts.Width,
                 Height:           opts.Height,
+                WindowStartState: options.Maximised,
                 MinWidth:         200,
                 MinHeight:        150,
                 AssetServer:      &assetserver.Options{
