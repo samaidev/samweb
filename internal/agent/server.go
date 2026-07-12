@@ -116,6 +116,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
         mux.HandleFunc("/agent/cdp-dom-text", s.handleCDPDOMText)
         mux.HandleFunc("/agent/cdp-dom-text-last", s.handleCDPDOMTextLast)
 mux.HandleFunc("/agent/cdp-dom-text-all", s.handleCDPDOMTextAll)
+	mux.HandleFunc("/agent/cdp-input-enter", s.handleCDPInputEnter)
         mux.HandleFunc("/agent/sse-enable", s.handleSSEEnable)
         mux.HandleFunc("/agent/sse-messages", s.handleSSEMessages)
         // Fetch domain capture (works when z.ai JS thread is blocked)
@@ -805,6 +806,29 @@ func (s *Server) handleCDPDOMTextAll(w http.ResponseWriter, r *http.Request) {
                 htmls = []string{}
         }
         writeJSON(w, http.StatusOK, map[string]interface{}{"htmls": htmls})
+}
+
+// handleCDPInputEnter sends a real Enter key via CDP Input domain.
+// POST /agent/cdp-input-enter {"selector":"#chat-input"}
+// Used by bridge to send messages — more reliable than JS KeyboardEvent.
+func (s *Server) handleCDPInputEnter(w http.ResponseWriter, r *http.Request) {
+        var body struct {
+                Selector string `json:"selector"`
+        }
+        if err := readJSON(r, &body); err != nil {
+                writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+                return
+        }
+        if body.Selector == "" {
+                body.Selector = "#chat-input"
+        }
+        ctx, cancel := ctxWithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := s.backend.CDPDispatchEnterKey(ctx, body.Selector); err != nil {
+                writeError(w, http.StatusInternalServerError, err.Error())
+                return
+        }
+        writeJSON(w, http.StatusOK, OK{OK: true})
 }
 
 // handleSSEEnable enables SSE/WebSocket capture via CDP Network domain.

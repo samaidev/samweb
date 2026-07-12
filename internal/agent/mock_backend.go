@@ -286,6 +286,9 @@ func (m *MockBackend) CDPDOMTextLast(ctx context.Context, selector string) (stri
 func (m *MockBackend) CDPDOMTextAll(ctx context.Context, selector string) ([]string, error) {
         return nil, fmt.Errorf("CDPDOMTextAll not supported on mock backend")
 }
+func (m *MockBackend) CDPDispatchEnterKey(ctx context.Context, selector string) error {
+        return fmt.Errorf("CDPDispatchEnterKey not supported on mock backend")
+}
 
 func (m *MockBackend) EnableSSECapture(ctx context.Context) error {
         return fmt.Errorf("EnableSSECapture not supported on mock backend")

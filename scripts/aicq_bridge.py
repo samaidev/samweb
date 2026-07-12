@@ -210,39 +210,33 @@ async def zai_read_response_via_dom(session, agent_base, pre_count=0, timeout=15
     (the newest NEW response). If no new messages exist with any
     selector, return {stage: waiting}.
     """
-    selectors = [
-        '[class*="chat-assistant"]',
-        '[class*="assistant-message"]',
-        '[class*="agent-message"]',
-        '[class*="markdown-prose"]',
-        '[class*="prose"]',
-    ]
-    for sel in selectors:
-        all_html = await zai_dom_text_all(session, agent_base, sel, timeout=timeout)
-        if not all_html:
-            continue
-        # Only consider NEW messages (index >= pre_count)
-        new_htmls = all_html[pre_count:] if pre_count > 0 else all_html
-        if not new_htmls:
-            continue
-        # Take the LAST new message (most recent response)
-        html = new_htmls[-1]
-        if not html or len(html) < 20:
-            continue
-        import re as _re
-        text_content = _re.sub(r'<[^>]+>', '', html).strip()
-        text_content = _re.sub(r'<!--.*?-->', '', text_content).strip()
-        if len(text_content) < 5:
-            continue
-        if any(err in text_content for err in ['回复内容为空', '请稍后重试', '限制沙箱',
-                                                '当前模型使用人数较多', '用量已超出',
-                                                '超出个人限制', 'Sandbox limit']):
-            return {"stage": "error", "error": text_content[:200]}
-        cleaned_html = clean_zai_html(html)
-        if '<' not in cleaned_html:
-            return {"stage": "responding", "response": cleaned_html}
-        return {"stage": "responding", "response": cleaned_html}
-    return {"stage": "waiting"}
+    # Only use chat-assistant selector — it precisely matches assistant
+    # message containers. Other selectors (markdown-prose, prose) match
+    # too many elements (chat-user messages + nested children), causing
+    # pre_count slicing to return wrong results.
+    all_html = await zai_dom_text_all(session, agent_base, '[class*="chat-assistant"]', timeout=timeout)
+    if not all_html:
+        return {"stage": "waiting"}
+    # Only consider NEW messages (index >= pre_count)
+    new_htmls = all_html[pre_count:] if pre_count > 0 else all_html
+    if not new_htmls:
+        # No new assistant messages yet — z.ai hasn't generated a response
+        return {"stage": "waiting"}
+    # Take the LAST new message (most recent response)
+    html = new_htmls[-1]
+    if not html or len(html) < 20:
+        return {"stage": "waiting"}
+    import re as _re
+    text_content = _re.sub(r'<[^>]+>', '', html).strip()
+    text_content = _re.sub(r'<!--.*?-->', '', text_content).strip()
+    if len(text_content) < 5:
+        return {"stage": "waiting"}
+    if any(err in text_content for err in ['回复内容为空', '请稍后重试', '限制沙箱',
+                                            '当前模型使用人数较多', '用量已超出',
+                                            '超出个人限制', 'Sandbox limit']):
+        return {"stage": "error", "error": text_content[:200]}
+    cleaned_html = clean_zai_html(html)
+    return {"stage": "responding", "response": cleaned_html}
 
 
 async def zai_eval(session, agent_base, script, timeout=10):
@@ -1174,34 +1168,20 @@ async def zai_type_and_send(session, agent_base, profile_id, message, core=None,
             }})()""")
             await asyncio.sleep(1)
 
-        # Click send
-        send_result = await zai_eval(session, agent_base, """(function(){
-            var sels = [
-                'button.sendMessageButton',
-                'button[class*="sendMessageButton"]',
-                'button[class*="send-button"]',
-                'button[type="submit"]',
-                'button[aria-label*="Send"]',
-                'button[aria-label*="发送"]'
-            ];
-            for (var i = 0; i < sels.length; i++) {
-                var btn = document.querySelector(sels[i]);
-                if (btn && !btn.disabled) { btn.click(); return 'sent:' + sels[i]; }
-            }
-            var input = document.querySelector('#chat-input, textarea, div[contenteditable="true"]');
-            if (input) {
-                var parent = input.closest('form, div[class*="input"], div[class*="chat"]');
-                if (parent) {
-                    var btns = parent.querySelectorAll('button');
-                    for (var j = 0; j < btns.length; j++) {
-                        if (!btns[j].disabled && btns[j].getBoundingClientRect().width > 0) {
-                            btns[j].click(); return 'sent:fallback_' + j;
-                        }
-                    }
-                }
-            }
-            return 'no_send_btn';
-        })()""")
+        # Send via CDP Input.dispatchKeyEvent (real Enter key).
+        # JS KeyboardEvent doesn't work with React/Svelte — CDP Input
+        # sends a real keyboard event that z.ai's handler recognizes.
+        try:
+            async def _do_enter():
+                resp = await session.post(f"{agent_base}/agent/cdp-input-enter",
+                    json={"selector": "#chat-input"},
+                    timeout=aiohttp.ClientTimeout(total=10))
+                data = await resp.json()
+                return data.get("ok", False)
+            ok = await asyncio.wait_for(_do_enter(), timeout=15)
+            send_result = 'sent:cdp_enter' if ok else 'cdp_enter_failed'
+        except Exception as e:
+            send_result = f'cdp_enter_error: {e}'
 
         if send_result and send_result.startswith('sent'):
             log(profile_id, f"send attempt {send_attempt+1}: {send_result}")
@@ -1830,6 +1810,34 @@ async def run_bridge(profile_id, agent_port, db_path):
                     pass
 
             for poll in range(max_polls):
+                # Anti-freeze: every 6 polls (30s), click Agent mode button
+                # + current chat to prevent z.ai JS thread from freezing.
+                # z.ai has a bug where the UI becomes unresponsive during
+                # long Agent tasks if there is no user interaction for ~30s.
+                # The click is non-destructive: clicking Agent mode when
+                # already active is a no-op; clicking the current chat just
+                # re-focuses it (no navigation).
+                if poll > 0 and poll % 6 == 0:
+                    # Anti-freeze: every 30s, click the current chat in
+                    # the sidebar to keep z.ai's JS thread alive.
+                    # DO NOT click the Agent mode button — it is a TOGGLE
+                    # and clicking when already active switches BACK to
+                    # Chat mode, losing all Agent task output.
+                    try:
+                        await zai_eval(session, agent_base, """(function(){
+                            // Click the current chat in sidebar (re-focus, no nav)
+                            var chatBtns = document.querySelectorAll("button.w-full.flex.justify-between");
+                            if (chatBtns.length > 0) {
+                                // Click the first one (current chat is at top after navigation)
+                                chatBtns[0].click();
+                                return "clicked_chat";
+                            }
+                            return "no_chat_btn";
+                        })()""", timeout=5)
+                        log(profile_id, f"anti-freeze: clicked current chat (poll {poll+1}/{max_polls})")
+                    except Exception as e:
+                        log(profile_id, f"anti-freeze click error: {e}")
+
                 # Step 1: Check Fetch chunks FIRST — works even when z.ai's
                 # JS thread is fully blocked during a long Agent task.
                 # Fetch.requestPaused events arrive via CDP WebSocket,
@@ -1912,49 +1920,13 @@ async def run_bridge(profile_id, agent_port, db_path):
                                                 await core.send_stream_end(from_id)
                                             break
 
-                                    # Send the accumulated text as a stream chunk
-                                    if fetch_text_buffer != last_sent_text:
-                                        if core and from_id:
-                                            try:
-                                                await core.send_stream_chunk(from_id, "text", fetch_text_buffer)
-                                            except: pass
-                                        last_sent_text = fetch_text_buffer
-                                        stable_count = 0
-                                        # Don't sleep too long — keep capturing chunks
-                                        await asyncio.sleep(3)
-                                        continue
+                                    # NOTE: Do NOT send fetch_text_buffer to AICQ.
+                                    # Fetch chunks contain raw SSE data (data: {...}
+                                    # lines, GIF binary) which is unreadable. Only
+                                    # DOM-read text should be sent to AICQ. Fetch is
+                                    # only used for error detection above.
                     except Exception as e:
                         log(profile_id, f"Fetch poll error: {e}")
-
-                # Step 1b: Also check SSE messages (legacy — z.ai may use
-                # SSE for some endpoints). Bypasses JS thread.
-                try:
-                    sse_resp = await asyncio.wait_for(
-                        session.get(f"{agent_base}/agent/sse-messages",
-                            timeout=aiohttp.ClientTimeout(total=10)),
-                        timeout=15)
-                    sse_data = await sse_resp.json()
-                    sse_msgs = sse_data if isinstance(sse_data, list) else []
-                    if sse_msgs:
-                        # Concatenate all new SSE data
-                        sse_text = "\n".join(m.get("data", "") for m in sse_msgs if m.get("data"))
-                        if sse_text and sse_text != last_sent_text:
-                            # Filter: only send meaningful content (skip empty/heartbeat)
-                            meaningful = [m for m in sse_msgs if len(m.get("data", "")) > 2]
-                            if meaningful:
-                                combined = "\n".join(m["data"] for m in meaningful)
-                                if combined != last_sent_text:
-                                    if core and from_id:
-                                        try:
-                                            await core.send_stream_chunk(from_id, "text", combined)
-                                        except: pass
-                                    last_sent_text = combined
-                                    stable_count = 0
-                                    log(profile_id, f"SSE streaming... ({len(combined)} chars, {len(meaningful)} msgs)")
-                                    await asyncio.sleep(10)
-                                    continue
-                except Exception:
-                    pass
 
                 # Step 2: Check if user cancelled
                 if core and from_id:

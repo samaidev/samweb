@@ -683,6 +683,17 @@ func (b *WailsBackend) CDPDOMTextAll(ctx context.Context, selector string) ([]st
         }
         return c.GetDOMTextAll(selector)
 }
+
+// CDPDispatchEnterKey sends a real Enter key via CDP Input domain.
+func (b *WailsBackend) CDPDispatchEnterKey(ctx context.Context, selector string) error {
+        b.cdpMu.RLock()
+        c := b.cdpClient
+        b.cdpMu.RUnlock()
+        if c == nil {
+                return fmt.Errorf("CDP client not connected")
+        }
+        return c.DispatchEnterKey(selector)
+}
 func (b *WailsBackend) EnableSSECapture(ctx context.Context) error {
         b.cdpMu.RLock()
         c := b.cdpClient

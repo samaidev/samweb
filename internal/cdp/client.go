@@ -1493,6 +1493,38 @@ func (c *Client) GetDOMTextAll(selector string) ([]string, error) {
         return out, nil
 }
 
+// DispatchEnterKey sends a real Enter keydown+keyup via CDP Input domain.
+// This is more reliable than JS KeyboardEvent for React/Svelte apps that
+// use synthetic events. Focuses the element with the given selector first.
+func (c *Client) DispatchEnterKey(selector string) error {
+        // Focus the element via Runtime.evaluate
+        focusJS := fmt.Sprintf(`(function(){
+                var el = document.querySelector(%q);
+                if (el) { el.focus(); return 'ok'; }
+                return 'not_found';
+        })()`, selector)
+        _, err := c.send("Runtime.evaluate", map[string]interface{}{
+                "expression":  focusJS,
+                "returnByValue": true,
+        })
+        if err != nil {
+                return fmt.Errorf("focus: %w", err)
+        }
+        // Send keydown + keyup via Input.dispatchKeyEvent
+        for _, evtType := range []string{"keyDown", "keyUp"} {
+                _, err := c.send("Input.dispatchKeyEvent", map[string]interface{}{
+                        "type":                  evtType,
+                        "key":                   "Enter",
+                        "code":                  "Enter",
+                        "windowsVirtualKeyCode": 13,
+                })
+                if err != nil {
+                        return fmt.Errorf("%s: %w", evtType, err)
+                }
+        }
+        return nil
+}
+
 // send sends a CDP command and waits for the response.
 // On timeout, attempts to reconnect once and retries.
 func (c *Client) send(method string, params interface{}) (json.RawMessage, error) {

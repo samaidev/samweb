@@ -93,6 +93,7 @@ type Backend interface {
         	CDPDOMTextLast(ctx context.Context, selector string) (string, error)
 	// CDPDOMTextAll reads ALL matching elements' HTML via CDP DOM domain
 	CDPDOMTextAll(ctx context.Context, selector string) ([]string, error)
+	CDPDispatchEnterKey(ctx context.Context, selector string) error
 
         // SSE capture: z.ai streams Agent output via SSE/WebSocket.
         // These CDP events bypass JS thread entirely.
