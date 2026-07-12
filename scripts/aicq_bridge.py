@@ -1113,17 +1113,22 @@ async def zai_type_and_send(session, agent_base, profile_id, message, core=None,
     Handles high-traffic popups: if z.ai shows "高峰时段" popup after
     sending, clicks "取消", waits 20s, and retries. Up to 20 retries.
     """
-    # Wait for chat input
-    for attempt in range(10):
-        ready = await zai_eval(session, agent_base, """(function(){
-            var el = document.querySelector('#chat-input, textarea[class*="chat-input"], div[contenteditable="true"]');
-            return el ? 'ready' : 'not_found';
-        })()""")
-        if ready == "ready":
-            break
-        await asyncio.sleep(2)
+    # Wait for chat input — use CDP DOM domain (bypasses JS thread).
+    # z.ai's JS may be frozen after navigation, so zai_eval (Runtime.evaluate)
+    # times out. CDP DOM.querySelectorAll works even when JS is blocked.
+    input_selectors = ['#chat-input', 'textarea', '[contenteditable="true"]']
+    for attempt in range(30):  # 30 × 2s = 60s max
+        for sel in input_selectors:
+            html = await zai_dom_text(session, agent_base, sel, timeout=5)
+            if html and len(html) > 10:
+                log(profile_id, f"chat input found via {sel} (attempt {attempt+1})")
+                break
+        else:
+            await asyncio.sleep(2)
+            continue
+        break
     else:
-        return False, "chat input not found"
+        return False, "chat input not found after 60s"
 
     # Type the message
     await zai_eval(session, agent_base, f"""(function(){{
@@ -1752,10 +1757,11 @@ async def run_bridge(profile_id, agent_port, db_path):
                     log(profile_id, "zai_new_chat returned None, will try to send to current page anyway")
             else:
                 log(profile_id, f"continuing z.ai chat {chat_id} for {from_id}")
-                # Navigate to the existing chat so z.ai's input box loads
+                # Navigate to the existing chat so z.ai's input box loads.
+                # Wait 10s for page load (z.ai Agent mode is slow to render).
                 await zai_eval(session, agent_base,
                     f"window.location.href = 'https://chat.z.ai/c/{chat_id}'")
-                await asyncio.sleep(5)
+                await asyncio.sleep(10)
 
             # Type + send (with high-traffic retry)
             ok, send_result = await zai_type_and_send(session, agent_base, profile_id, content_clean, core, from_id)
@@ -1767,21 +1773,15 @@ async def run_bridge(profile_id, agent_port, db_path):
             # Record the number of assistant messages BEFORE sending,
             # so we only stream NEW responses (not old ones from the
             # chat history).
-            pre_count = await zai_eval(session, agent_base, """(function(){
-                var sels = ['[class*="chat-assistant"]','[class*="assistant-message"]','[class*="agent-message"]','[class*="markdown-prose"]','[class*="prose"]'];
-                var asst = [];
-                for (var s = 0; s < sels.length; s++) {
-                    var f = document.querySelectorAll(sels[s]);
-                    for (var i = 0; i < f.length; i++) asst.push(f[i]);
-                }
-                var seen = {};
-                asst = asst.filter(function(el){var k=el.outerHTML.slice(0,200);if(seen[k])return false;seen[k]=true;return true;});
-                asst = asst.filter(function(el){var c=(el.className||'').toString();return c.indexOf('chat-user')<0 && c.indexOf('user-message')<0;});
-                return asst.length;
-            })()""")
-            if not isinstance(pre_count, int):
-                try: pre_count = int(pre_count)
-                except: pre_count = 0
+            # CRITICAL: Use CDP DOM domain (zai_dom_text_all) — same method
+            # as zai_read_response_via_dom — so the count matches exactly.
+            # Previously used zai_eval (JS) which counted more elements
+            # (markdown-prose children, etc.), causing pre_count > actual
+            # DOM count, which made zai_read_response_via_dom return
+            # 'waiting' forever (slice [pre_count:] was always empty).
+            pre_count_htmls = await zai_dom_text_all(session, agent_base,
+                '[class*="chat-assistant"]', timeout=10)
+            pre_count = len(pre_count_htmls) if pre_count_htmls else 0
             log(profile_id, f"assistant messages before send: {pre_count}")
 
             # Enable Fetch capture BEFORE sending — z.ai Agent mode streams
